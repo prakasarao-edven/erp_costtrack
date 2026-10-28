@@ -107,6 +107,9 @@ const Editor = ({ kind, plan, setPlan, onSaved, onNew }) => {
   const api = useApi();
   const { master, reloadMaster } = useApp();
   const [busy, setBusy] = useState(false);
+  const remove = async () => {
+    try { await api.delete(`/plans/${plan.id}`); toast.success("Draft plan deleted"); onNew(); onSaved(); } catch (e) { toast.error(errMsg(e)); }
+  };
   const crews = master.crews.filter((c) => !plan.project_number || c.project_number === plan.project_number);
   const save = async (publish) => {
     setBusy(true);
@@ -156,6 +159,9 @@ const Editor = ({ kind, plan, setPlan, onSaved, onNew }) => {
         <Button variant="outline" disabled={busy} onClick={() => save(false)} data-testid={`${kind}-plan-save-draft-btn`}>Save draft</Button>
         <Button disabled={busy} onClick={() => save(true)} data-testid={`${kind}-plan-publish-btn`}>Publish plan</Button>
         <Button variant="ghost" onClick={onNew} data-testid={`${kind}-plan-new-btn`}>New plan</Button>
+        {plan.id && plan.status === "draft" && (
+          <Button variant="ghost" className="text-rose-400" onClick={remove} data-testid={`${kind}-plan-delete-btn`}><Trash2 className="mr-1 h-4 w-4" />Delete draft</Button>
+        )}
         {plan.status && <StatusBadge status={plan.status} testid={`${kind}-plan-status`} />}
       </div>
     </div>

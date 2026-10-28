@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, HTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
+from starlette.concurrency import run_in_threadpool
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -61,7 +62,7 @@ async def current_member(user: dict = Depends(require_user)) -> dict:
     uid = user["user_id"]
     member = await db.users.find_one({"user_id": uid}, {"_id": 0})
     if member is None or not member.get("role"):
-        prof = _clerk_profile(uid)
+        prof = await run_in_threadpool(_clerk_profile, uid)
         role = "admin" if prof["is_admin"] else DEFAULT_ROLE
         await db.users.update_one({"user_id": uid, "role": {"$in": [None, ""]}}, {"$set": {"role": role}})
         member = await db.users.find_one_and_update(

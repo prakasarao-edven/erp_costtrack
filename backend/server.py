@@ -9,13 +9,13 @@ from starlette.middleware.cors import CORSMiddleware
 try:
     from backend.clerk_auth import clerk_router
     from backend.core import ACTIVE, ENV, IN_ENV, RANK, ROLES, audit, client, current_member, db, effective_role, new_id, now_iso, require_role
-    from backend.engine import PENDING, build_cost_transactions, get_settings, next_status, route_on_submit, step_roles, validate
+    from backend.engine import PENDING, build_cost_transactions, get_settings, next_status, plan_rows, route_on_submit, step_roles, validate
     from backend.erp import get_adapter
     from backend.seed import next_ref, seed
 except ModuleNotFoundError:
     from clerk_auth import clerk_router
     from core import ACTIVE, ENV, IN_ENV, RANK, ROLES, audit, client, current_member, db, effective_role, new_id, now_iso, require_role
-    from engine import PENDING, build_cost_transactions, get_settings, next_status, route_on_submit, step_roles, validate
+    from engine import PENDING, build_cost_transactions, get_settings, next_status, plan_rows, route_on_submit, step_roles, validate
     from erp import get_adapter
     from seed import next_ref, seed
 
@@ -133,11 +133,26 @@ async def _plan_roles_check(kind: str, member: dict):
         raise HTTPException(403, "Not allowed")
 
 
-def _plan_doc(body: PlanIn) -> dict:
+async def _plan_doc(body: PlanIn) -> dict:
     if body.end_date < body.start_date:
         raise HTTPException(400, "End date is before start date")
-    if body.kind == "crew" and not body.crew_id:
-        raise HTTPException(400, "Crew is required")
+    if body.kind == "crew":
+        if not body.crew_id or not await db.crews.find_one({"id": body.crew_id}):
+            raise HTTPException(400, "Valid crew is required")
+        for ln in body.lines:
+            coll = db.employees if ln.resource_type == "labor" else db.equipment
+            if not ln.resource_type or not ln.resource_number or not await coll.find_one({"number": ln.resource_number}):
+                raise HTTPException(400, "Every plan line needs a valid employee or equipment")
+            if any(v < 0 or v > 24 for v in ln.hours.values()):
+                raise HTTPException(400, "Planned hours must be between 0 and 24")
+    else:
+        for ln in body.lines:
+            if not ln.item_number or not await db.items.find_one({"number": ln.item_number}):
+                raise HTTPException(400, "Every material plan line needs a valid item")
+            if not ln.planned_qty or ln.planned_qty <= 0:
+                raise HTTPException(400, f"{ln.item_number}: planned quantity must be greater than 0")
+    if not await db.tasks.find_one({"project_number": body.project_number, "number": body.task_number}):
+        raise HTTPException(400, "Unknown Project# / Task#")
     lines = [ln.model_dump(exclude_none=True) for ln in body.lines]
     return {**body.model_dump(exclude={"lines"}), "lines": lines}
 
@@ -151,7 +166,7 @@ async def list_plans(kind: Optional[str] = None, member: dict = Depends(all_acti
 @api.post("/plans")
 async def create_plan(body: PlanIn, member: dict = Depends(all_active())):
     await _plan_roles_check(body.kind, member)
-    doc = {"id": new_id(), **_plan_doc(body), "status": "draft", "created_by": member.get("name"), "created_by_id": member["user_id"], "created_at": now_iso()}
+    doc = {"id": new_id(), **(await _plan_doc(body)), "status": "draft", "created_by": member.get("name"), "created_by_id": member["user_id"], "created_at": now_iso()}
     await db.plans.insert_one(doc)
     await audit("plan", doc["id"], "created (draft)", member)
     doc.pop("_id", None)
@@ -163,7 +178,9 @@ async def update_plan(plan_id: str, body: PlanIn, member: dict = Depends(all_act
     await _plan_roles_check(body.kind, member)
     if not await db.plans.find_one({"id": plan_id}):
         raise HTTPException(404, "Not found")
-    upd = {**_plan_doc(body), "status": "draft", "updated_at": now_iso()}
+    if await db.transactions.find_one({"plan_id": plan_id, "status": {"$ne": "draft"}}):
+        raise HTTPException(409, "Entries were already captured against this plan - create a new plan instead")
+    upd = {**(await _plan_doc(body)), "status": "draft", "updated_at": now_iso()}
     await db.plans.update_one({"id": plan_id}, {"$set": upd})
     await audit("plan", plan_id, "updated (back to draft)", member)
     return await db.plans.find_one({"id": plan_id}, P)
@@ -180,9 +197,9 @@ async def publish_plan(plan_id: str, member: dict = Depends(all_active())):
     if plan["kind"] == "crew":
         others = await db.plans.find({"kind": "crew", "status": "published", "id": {"$ne": plan_id}, "shift": plan.get("shift"),
                                       "start_date": {"$lte": plan["end_date"]}, "end_date": {"$gte": plan["start_date"]}}, P).to_list(1000)
-        mine = {ln["resource_number"] for ln in plan["lines"]}
+        mine = {ln.get("resource_number") for ln in plan["lines"]}
         for o in others:
-            clash = mine & {ln["resource_number"] for ln in o["lines"]}
+            clash = mine & {ln.get("resource_number") for ln in o["lines"]}
             if clash:
                 raise HTTPException(409, f"Conflict: {', '.join(sorted(clash))} already planned on {o['project_number']}/{o['task_number']} "
                                          f"({o['start_date']} to {o['end_date']}, {o.get('shift')})")
@@ -207,17 +224,7 @@ async def autofill(type: Literal["labor", "equipment"], project_number: str, tas
                                     "crew_id": crew_id, "start_date": {"$lte": date}, "end_date": {"$gte": date}}, P)
     if not plan:
         return {"plan": None, "lines": []}
-    order = [h["code"] for h in await db.hour_types.find({"resource_type": type}, P).sort("order", 1).to_list(50)]
-    lines = []
-    for ln in plan["lines"]:
-        if ln.get("resource_type") != type:
-            continue
-        for code in order:
-            h = ln["hours"].get(code)
-            if h:
-                lines.append({"resource_number": ln["resource_number"], "hour_type": code, "planned_hours": h, "hours": h,
-                              "present": True, "plan_line": True})
-    return {"plan": plan, "lines": lines}
+    return {"plan": plan, "lines": await plan_rows(plan, type)}
 
 
 # ---------- Capture ----------
@@ -263,6 +270,16 @@ async def _check_master(body: TxIn):
             raise HTTPException(400, "Item is required on every line")
         if body.type != "material" and (not ln.resource_number or not ln.hour_type):
             raise HTTPException(400, "Resource and Hour Type are required on every line")
+    coll, key = {"labor": (db.employees, "resource_number"), "equipment": (db.equipment, "resource_number"), "material": (db.items, "item_number")}[body.type]
+    nums = {getattr(ln, key) for ln in body.lines}
+    known = {d["number"] for d in await coll.find({"number": {"$in": list(nums)}}, {"_id": 0, "number": 1}).to_list(10000)}
+    if nums - known:
+        raise HTTPException(400, f"Unknown: {', '.join(sorted(nums - known))}")
+    if body.type != "material":
+        codes = {h["code"] for h in await db.hour_types.find({"resource_type": body.type}, P).to_list(50)}
+        bad = {ln.hour_type for ln in body.lines} - codes
+        if bad:
+            raise HTTPException(400, f"Unknown hour type: {', '.join(sorted(bad))}")
 
 
 def _tx_from(body: TxIn) -> dict:
@@ -376,7 +393,10 @@ async def get_tx(tx_id: str, member: dict = Depends(all_active())):
 async def approvals(member: dict = Depends(require_role(*APPROVERS))):
     s = await get_settings()
     statuses = [st for st in PENDING if member["role"] in step_roles(st, s)]
-    return await db.transactions.find({"status": {"$in": statuses}}, P).sort("submitted_at", 1).to_list(2000)
+    q = {"status": {"$in": statuses}}
+    if member["role"] != "admin":
+        q["submitted_by_id"] = {"$ne": member["user_id"]}
+    return await db.transactions.find(q, P).sort("submitted_at", 1).to_list(2000)
 
 
 class DecisionIn(BaseModel):
@@ -394,13 +414,16 @@ async def approve(tx_id: str, body: DecisionIn, member: dict = Depends(require_r
     if tx.get("submitted_by_id") == member["user_id"] and member["role"] != "admin":
         raise HTTPException(403, "You cannot approve your own entry")
     step = tx["status"]
-    tx["status"] = next_status(tx)
-    tx["approvals"].append({"step": step, "decision": "approved", "by": member.get("name"), "role": member["role"], "at": now_iso(), "comment": body.comment})
-    if tx["status"] == "approved":
-        tx["approved_at"] = now_iso()
+    new_status = next_status(tx)
+    entry = {"step": step, "decision": "approved", "by": member.get("name"), "role": member["role"], "at": now_iso(), "comment": body.comment}
+    upd = {"status": new_status, **({"approved_at": now_iso()} if new_status == "approved" else {})}
+    res = await db.transactions.update_one({"id": tx_id, "status": step}, {"$set": upd, "$push": {"approvals": entry}})
+    if not res.modified_count:
+        raise HTTPException(409, "Entry was already actioned by someone else")
+    tx = await db.transactions.find_one({"id": tx_id}, P)
+    if new_status == "approved":
         await _create_costs(tx, s)
-    await db.transactions.replace_one({"id": tx_id}, tx)
-    await audit("transaction", tx_id, f"approved {step} -> {tx['status']}", member, {"comment": body.comment})
+    await audit("transaction", tx_id, f"approved {step} -> {new_status}", member, {"comment": body.comment})
     return tx
 
 
@@ -417,11 +440,13 @@ async def reject(tx_id: str, body: RejectIn, member: dict = Depends(require_role
     if member["role"] not in step_roles(tx["status"], s):
         raise HTTPException(403, "Not your approval step")
     step = tx["status"]
-    tx["approvals"].append({"step": step, "decision": "rejected", "by": member.get("name"), "role": member["role"], "at": now_iso(), "comment": body.reason})
-    tx.update(status="rejected", rejection_reason=body.reason)
-    await db.transactions.replace_one({"id": tx_id}, tx)
+    entry = {"step": step, "decision": "rejected", "by": member.get("name"), "role": member["role"], "at": now_iso(), "comment": body.reason}
+    res = await db.transactions.update_one({"id": tx_id, "status": step},
+                                           {"$set": {"status": "rejected", "rejection_reason": body.reason}, "$push": {"approvals": entry}})
+    if not res.modified_count:
+        raise HTTPException(409, "Entry was already actioned by someone else")
     await audit("transaction", tx_id, f"rejected at {step}", member, {"reason": body.reason})
-    return tx
+    return await db.transactions.find_one({"id": tx_id}, P)
 
 
 # ---------- Dashboard / reports ----------

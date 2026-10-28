@@ -27,6 +27,43 @@ DEFAULT_SETTINGS = {
 PENDING = ["pending_step1", "pending_special", "pending_step2"]
 
 
+async def plan_rows(plan: dict, rtype: str) -> list[dict]:
+    """Expected timesheet rows (one per resource x hour type) from a published crew plan."""
+    order = [h["code"] for h in await db.hour_types.find({"resource_type": rtype}, {"_id": 0}).sort("order", 1).to_list(50)]
+    rows = []
+    for ln in plan["lines"]:
+        if ln.get("resource_type") != rtype:
+            continue
+        for code in order:
+            h = ln["hours"].get(code)
+            if h:
+                rows.append({"resource_number": ln["resource_number"], "hour_type": code, "planned_hours": h, "hours": h,
+                             "present": True, "plan_line": True})
+    return rows
+
+
+async def _apply_plan(tx: dict) -> bool:
+    """Server-side plan comparison: planned hours come from the published plan, never the client. Returns unmodified flag."""
+    for ln in tx["lines"]:
+        ln["plan_line"], ln["planned_hours"] = False, None
+    if tx["type"] == "material" or tx.get("mode") != "plan" or not tx.get("plan_id"):
+        return False
+    plan = await db.plans.find_one({"id": tx["plan_id"], "kind": "crew", "status": "published", "project_number": tx["project_number"],
+                                    "task_number": tx["task_number"], "crew_id": tx.get("crew_id"),
+                                    "start_date": {"$lte": tx["date"]}, "end_date": {"$gte": tx["date"]}}, {"_id": 0})
+    if not plan:
+        return False
+    expected = {(r["resource_number"], r["hour_type"]): r["planned_hours"] for r in await plan_rows(plan, tx["type"])}
+    seen = set()
+    for ln in tx["lines"]:
+        k = (ln["resource_number"], ln["hour_type"])
+        if k in expected and k not in seen:
+            ln["plan_line"], ln["planned_hours"] = True, expected[k]
+            seen.add(k)
+    return (seen == set(expected) and len(tx["lines"]) == len(expected)
+            and all(ln["present"] and ln["hours"] == ln["planned_hours"] for ln in tx["lines"]))
+
+
 async def get_settings() -> dict:
     s = await db.settings.find_one({"id": "global"}, {"_id": 0})
     return s or DEFAULT_SETTINGS
@@ -137,7 +174,7 @@ async def _tolerance_check(tx: dict, s: dict) -> dict:
         plan = await db.plans.find_one({"kind": "material", "status": "published", "project_number": tx["project_number"],
                                         "task_number": tx["task_number"], "start_date": {"$lte": tx["date"]}, "end_date": {"$gte": tx["date"]}}, {"_id": 0})
         prior_docs = await _active_txs(tx, {"date": {"$gte": plan["start_date"], "$lte": plan["end_date"]}}) if plan else []
-        planned = {ln["item_number"]: ln["planned_qty"] for ln in (plan or {}).get("lines", [])}
+        planned = {ln["item_number"]: ln["planned_qty"] for ln in (plan or {}).get("lines", []) if ln.get("planned_qty")}
         for ln in tx["lines"]:
             p = planned.get(ln["item_number"])
             if p is None:
@@ -150,13 +187,15 @@ async def _tolerance_check(tx: dict, s: dict) -> dict:
                       tolerance_status="breach" if dev > tol else "within")
             breach = breach or ln["tolerance_status"] == "breach"
         tx["plan_id"] = (plan or {}).get("id")
-    return {"pct": tol, "breach": breach, "behavior": s["tolerance_behavior"],
+    has_plan = any(ln.get("tolerance_status") not in (None, "unplanned") for ln in tx["lines"])
+    return {"pct": tol, "breach": breach, "has_plan": has_plan, "behavior": s["tolerance_behavior"],
             "blocked": breach and s["tolerance_behavior"] == "stop"}
 
 
 async def validate(tx: dict) -> dict:
     s = await get_settings()
     await price(tx)
+    unmodified = await _apply_plan(tx)
     t = tx["type"]
     budget = await _budget_check(tx, s)
     tolerance = await _tolerance_check(tx, s)
@@ -179,10 +218,13 @@ async def validate(tx: dict) -> dict:
                     errors.append(f"{ln['item_number']}: reason code is required for wastage")
                 if s.get("special_on_wastage"):
                     reasons.append(f"{ln['item_number']} wastage {ln['qty_wasted']} {ln['uom']} ({ln.get('reason_code') or 'no reason'})")
+    if t in ("labor", "equipment"):
+        per = {}
+        for ln in tx["lines"]:
+            per[ln["resource_number"]] = per.get(ln["resource_number"], 0) + ln["hours"]
+        errors += [f"{r}: {h}h in one day exceeds 24h" for r, h in per.items() if h > 24]
     if not tx["lines"]:
         errors.append("Add at least one line")
-    unmodified = tx.get("mode") == "plan" and bool(tx["lines"]) and all(
-        ln.get("plan_line") and ln["present"] and ln["hours"] == ln.get("planned_hours") for ln in tx["lines"])
     v = {"budget": budget, "tolerance": tolerance, "special": {"required": bool(reasons), "reasons": reasons},
          "errors": errors, "unmodified_from_plan": unmodified,
          "blocked": bool(errors) or budget["blocked"] or tolerance["blocked"]}

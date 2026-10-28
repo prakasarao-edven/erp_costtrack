@@ -1,0 +1,56 @@
+{
+  "summary": "Iteration 1 full-stack test of CostBridge. Backend: 22/22 core pytest cases pass (auth 401/403, role gating, crew/material planning incl. 409 double-booking, labor autofill/tolerance/absent/manual rate math, equipment DOWN reason + PM->special->CC->approved chain with Oracle payloads, material validation/consumed/cost/vs-plan/return_to_store, reject(min 3)/resubmit restart, own-entry 403, Setup stoppers + full auto-approval (restored), rate card/hour type edit, dashboard KPIs/filter, ERP not-configured 400s, users role change). 1 skipped (last-admin 409 untestable: 2 admins exist - cb.admin + krishna.adalath). Separate bug-repro suite: 5/5 confirmed bugs (see critical). Frontend (Clerk ticket sign-in per role): pending 'Awaiting access' + session persists on refresh, per-role sidebars, labor load-from-plan 4 rows / breach / absent / submit / manual cost, equipment reason gating + special flag, material errors + special + submit, approvals filters/flagged/review sheet/reject reason gating/approve, foreman Fix & resubmit with rejection reason banner, crew plan 409 toast, material plan cost total, dashboard filter, reports filter/CSV download/detail (approval chain, ERP lines, audit trail), ERP page disabled buttons + payload dialog, Setup save/persist, rate edit/persist/source toggle, users role change, mobile nav - all working.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/transactions (+preview) - engine.validate unmodified_from_plan", "issue": "Deleting rows that were loaded from plan still yields unmodified_from_plan=true (only remaining rows are checked) -> entry auto-skips Step 1 (or is fully auto-approved with auto_approval=full). Exception management bypass.", "priority": "HIGH"},
+      {"endpoint": "POST /api/transactions - engine.validate", "issue": "plan_line/planned_hours are trusted from the client; a manual entry with mode=plan, plan_line=true, planned_hours==hours and NO published plan is treated as unmodified -> auto-approval. Server must rebuild planned lines from the published plan (autofill logic) and compare; also require every plan line to be present.", "priority": "HIGH"},
+      {"endpoint": "POST /api/transactions/{id}/approve", "issue": "Read-modify-replace without status guard: 4 concurrent approve calls at pending_step2 -> two 200s, duplicate approval entries and DUPLICATE cost_transactions (2 queued Oracle lines for a 1-line entry). Use find_one_and_update with {'id':..,'status':step} condition (same for reject).", "priority": "HIGH"},
+      {"endpoint": "POST /api/plans (material) -> POST /api/transactions/preview", "issue": "Material plan line without planned_qty is accepted & publishable; afterwards every material preview/submit for that project/task/period returns 500 (KeyError 'planned_qty' in engine._tolerance_check). UI can trigger this (mplan qty left empty). Validate planned_qty > 0 on material plan lines.", "priority": "HIGH"},
+      {"endpoint": "POST /api/plans/{id}/publish (crew)", "issue": "Crew plan line without resource_number -> 500 KeyError in conflict check. Validate lines (resource_type+resource_number required, hours >= 0), and validate crew_id exists.", "priority": "MEDIUM"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/plans", "issue": "Negative planned hours accepted (hours dict values not validated ge=0/le=24)."},
+      {"endpoint": "POST /api/transactions", "issue": "Unknown resource_number / item_number accepted (rate_missing -> $0 cost) and submittable; should be 400 like unknown Project/Task."},
+      {"endpoint": "POST /api/transactions", "issue": "Same employee can log 20h REG + 20h OT on one day (24h cap is per line only, no per-resource daily cap)."},
+      {"endpoint": "PUT /api/plans/{id}", "issue": "Any planner can edit a published plan (reverts it to draft, then deletable) even after entries were captured against it; no ownership check."},
+      {"endpoint": "/api/transactions", "issue": "No endpoint to delete own drafts (draft LAB-00015 left over, tagged TEST_iter1)."},
+      {"endpoint": "seed.py", "issue": "Seeded material plan (CEM 400 BAG, REBAR 15 TON for current month) is far below seeded same-month consumption (3220 / 70), so every material entry on Civil-WBS-3 is a tolerance breach (+393%). Seeded labor budget for Civil-WBS-3 is also ~90% consumed, so 'unmodified plan -> pending_step2' only works once before the budget warning routes entries to Step 1."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Approvals queue", "issue": "Approver's own submissions are listed (e.g. PM sees LAB-00009 he submitted); clicking Approve only yields a 403 toast. Hide or mark 'your entry' and disable Approve.", "selector": "[data-testid^='approval-row-']", "priority": "LOW"},
+      {"component": "ValidationPanel", "issue": "For manual entries with no planned rows the Plan tolerance card shows 'Within tolerance - All planned rows are within tolerance' - should read 'No plan / unplanned'.", "selector": "[data-testid='validation-panel']", "priority": "LOW"},
+      {"component": "Planning", "issue": "No delete button for draft plans in UI (API supports DELETE).", "selector": "[data-testid='plan-list']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "All entry/planning forms", "issues": ["Native <input type=date> browser picker used instead of shadcn Calendar/Popover"]},
+      {"screen": "Pending (Awaiting access)", "issues": ["No explicit 'Sign out' button - only Clerk avatar menu"]},
+      {"screen": "Approvals", "issues": ["Button label 'Approve & Post' at step 2 is misleading - approval only queues cost lines; ERP push is a separate action"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/conftest.py", "/app/backend/tests/test_costbridge_api.py", "/app/backend/tests/test_costbridge_bugs.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Server-side plan comparison: compute unmodified_from_plan from the published plan (all plan lines present, present=true, hours equal), never from client plan_line/planned_hours",
+    "Make approve/reject atomic with a status-conditioned find_one_and_update to prevent duplicate approvals & duplicate Oracle cost lines",
+    "Validate plan lines (material: item_number + planned_qty>0; crew: resource_type + resource_number, hours 0-24) and guard engine against missing planned_qty",
+    "Validate resource_number/item_number exist in master data on capture",
+    "Optional: per-resource daily hours cap; hide own entries in approval queue; fix 'Within tolerance' label for unplanned entries; delete draft plan/entry buttons"
+  ],
+  "critical_code_review_comments": [
+    "engine.validate: unmodified check iterates only submitted lines - must compare against plan line set",
+    "server.approve/reject: non-atomic replace_one -> race/double posting",
+    "engine._tolerance_check: ln['planned_qty'] KeyError when plan line lacks qty (exclude_none drops it)",
+    "server.publish_plan: ln['resource_number'] KeyError; crew_id not validated",
+    "core._clerk_profile uses sync requests inside async dependency (blocks event loop on first sign-in) - minor"
+  ],
+  "updated_files": ["/app/backend/tests/conftest.py", "/app/backend/tests/test_costbridge_api.py", "/app/backend/tests/test_costbridge_bugs.py"],
+  "success_rate": {"backend": "81% (22/27 incl. 5 confirmed bug repro tests failing)", "frontend": "95% (all requested flows work; minor UX issues)"},
+  "test_credentials": "Used /app/memory/test_credentials.md users (cb.admin/pm/cc/foreman/store/pending +clerk_test@example.com) via scripts/test_users.py --tokens/--tickets. Not modified, not deleted.",
+  "seed_data_creation": "Created (tagged notes TEST_iter1): published crew plan PRJ-1042/Struct-WBS-2 Crew-B Night Shift 2027-03-10 (E-10027); published material plan PRJ-2088/Piping-WBS-4 2027-03; several LAB/EQP/MAT entries (LAB-00006..00017, EQP-00006/7, MAT-00004/5) incl. one draft LAB-00015. Settings restored to defaults (warning/90, warning, 15/15/10, step1). Note: equipment rate_source=erp was set by krishna.adalath at 16:29 (not by tests) - left as is. Helper REG rate restored to 22.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: cd /app/backend && python3 -m pytest tests/ (pytest.ini forces -n 2 --dist loadscope; serial = -n 0). Tokens via conftest (calls scripts/test_users.py --tokens). test_costbridge_bugs.py should pass after fixes. Civil-WBS-3 labor budget now ~98% consumed by tests, MEP-WBS-7 labor >100% (used for budget-stopper test). UI sign-in: read /tmp/tickets.txt inside browser script (json.load) and open /sign-in?__clerk_ticket=...; tickets single-use, regenerate per run. Last-admin 409 not testable while 2 admins exist.",
+  "rca of the issue": "Auto-approval bypass: validate() derives 'unmodified' purely from submitted lines' plan_line/planned_hours flags (client-controlled, and missing rows invisible). Duplicate costs: approve() reads tx, mutates in memory and replace_one's without a status precondition, so concurrent requests both pass the PENDING check. 500s: PlanLine model leaves resource_number/planned_qty optional and model_dump(exclude_none) drops them, while publish_plan/_tolerance_check index them directly."
+}

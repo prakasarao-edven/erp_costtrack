@@ -92,7 +92,7 @@ export default function Approvals() {
               <div className="mt-6 flex gap-3">
                 <Button variant="outline" onClick={() => setRejecting(true)} disabled={busy} data-testid="approval-reject-btn">Reject</Button>
                 <Button onClick={() => act("approve")} disabled={busy} data-testid="approval-approve-btn">
-                  {sel.status === "pending_step2" ? "Approve & Post" : "Approve"}
+                  {sel.status === "pending_step2" ? "Final approve - queue for ERP" : "Approve"}
                 </Button>
               </div>
             </div>

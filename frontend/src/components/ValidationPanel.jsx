@@ -27,10 +27,10 @@ export default function ValidationPanel({ tx }) {
       <div className="cb-card p-4">
         <div className="mb-3 flex items-center justify-between">
           <span className="cb-eyebrow">Plan tolerance (±{v.tolerance.pct}%)</span>
-          <StatusBadge status={v.tolerance.breach ? "breach" : "within"} testid="tolerance-status-badge" />
+          <StatusBadge status={!v.tolerance.has_plan ? "unplanned" : v.tolerance.breach ? "breach" : "within"} label={!v.tolerance.has_plan ? "No plan" : undefined} testid="tolerance-status-badge" />
         </div>
         <p className="text-sm text-muted-foreground">
-          {v.tolerance.breach ? "One or more rows deviate from plan beyond tolerance - standard approval required." : "All planned rows are within tolerance."}
+          {!v.tolerance.has_plan ? "No published plan rows to compare against - manual entry." : v.tolerance.breach ? "One or more rows deviate from plan beyond tolerance - standard approval required." : "All planned rows are within tolerance."}
         </p>
         <p className="mt-2 text-xs text-muted-foreground">Behavior: {v.tolerance.behavior === "stop" ? "Stopper" : "Warning only"}</p>
         <div className="mt-3 flex items-center gap-2 text-sm" data-testid="auto-approval-eligibility">
