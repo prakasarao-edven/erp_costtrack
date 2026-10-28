@@ -1,9 +1,10 @@
 import { useMemo } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2, Wand2 } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { useApp } from "@/context/AppContext";
 import { useEntry } from "@/hooks/useEntry";
-import { num, usd } from "@/lib/api";
+import { errMsg, num, usd } from "@/lib/api";
 import { DataList, Field, PageHeader, Pick, ProjectTaskFields, StatusBadge, Sel } from "@/components/common";
 import ValidationPanel from "@/components/ValidationPanel";
 import RecentEntries from "@/components/RecentEntries";
@@ -20,6 +21,20 @@ export default function MaterialEntry() {
   const locked = !!e.editing && !["draft", "rejected"].includes(e.editing.status);
   const itemOptions = useMemo(() => master.items.map((x) => ({ value: x.number, label: `${x.number} - ${x.description}` })), [master.items]);
 
+  const loadPlan = async () => {
+    const h = e.header;
+    if (!h.project_number || !h.task_number || !h.date) return toast.error("Select project, task and date first");
+    try {
+      const { data } = await e.api.get("/plans/material-autofill", { params: { project_number: h.project_number, task_number: h.task_number, date: h.date } });
+      if (!data.plan || data.lines.length === 0) {
+        e.setMode("manual"); e.setPlanId(null);
+        return toast.info("No published material plan covers this task and date - add items manually");
+      }
+      e.setMode("plan"); e.setPlanId(data.plan.id); e.setLines(data.lines);
+      toast.success(`Loaded ${data.lines.length} items from plan (issued = remaining planned qty)`);
+    } catch (err) { toast.error(errMsg(err)); }
+  };
+
   return (
     <div>
       <PageHeader eyebrow="Capture / Material" title="Material Issue Entry"
@@ -31,7 +46,7 @@ export default function MaterialEntry() {
           {e.editing.status === "rejected" && <> - rejected: <span className="text-rose-300">{e.editing.rejection_reason}</span></>}
         </div>
       )}
-      <div className="cb-card mb-6 grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4 cb-rise">
+      <div className="cb-card mb-6 grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-5 cb-rise">
         <ProjectTaskFields testid="material-entry" value={e.header} onChange={(p) => e.setHeader((h) => ({ ...h, ...p }))} />
         <Field label="Issue date">
           <input type="date" className="cb-input" data-testid="material-entry-date-input" value={e.header.date} onChange={(ev) => e.setHeader((h) => ({ ...h, date: ev.target.value }))} />
@@ -40,8 +55,14 @@ export default function MaterialEntry() {
           <input className="cb-input" data-testid="material-entry-notes-input" value={e.header.notes} placeholder="Store / issue slip ref"
             onChange={(ev) => e.setHeader((h) => ({ ...h, notes: ev.target.value }))} />
         </Field>
+        <div className="flex items-end">
+          <Button onClick={loadPlan} variant="secondary" className="w-full" data-testid="material-load-plan-btn"><Wand2 className="mr-1.5 h-4 w-4" />Load from plan</Button>
+        </div>
       </div>
-      <div className="mb-2 flex justify-end">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-xs text-muted-foreground" data-testid="entry-mode-label">
+          Mode: <span className="text-amber-400">{e.mode === "plan" ? "Auto-filled from published material plan" : "Manual entry"}</span>
+        </span>
         <Button size="sm" variant="ghost" data-testid="material-add-line-btn"
           onClick={() => e.setLines((ls) => [...ls, { item_number: "", qty_issued: null, qty_wasted: 0, qty_returned: 0 }])}>
           <Plus className="mr-1 h-4 w-4" />Add item
@@ -51,11 +72,12 @@ export default function MaterialEntry() {
         <table className="w-full" data-testid="material-lines-table">
           <thead><tr>
             <th className="cb-th">Item</th><th className="cb-th">UOM</th><th className="cb-th text-right">Unit cost (ERP)</th>
+            <th className="cb-th text-right">Planned / used</th>
             <th className="cb-th text-right">Issued</th><th className="cb-th text-right">Wasted</th><th className="cb-th text-right">Returned</th>
             <th className="cb-th">Reason</th><th className="cb-th text-right">Consumed</th><th className="cb-th">vs Plan</th><th className="cb-th text-right">Cost</th><th className="cb-th" />
           </tr></thead>
           <tbody>
-            {e.lines.length === 0 && <tr><td colSpan={11} className="p-8 text-center text-sm text-muted-foreground">Add the items issued.</td></tr>}
+            {e.lines.length === 0 && <tr><td colSpan={12} className="p-8 text-center text-sm text-muted-foreground">Load from plan, or add the items issued.</td></tr>}
             {e.lines.map((ln, i) => {
               const pv = e.preview?.lines?.[i];
               const it = master.items.find((x) => x.number === ln.item_number);
@@ -68,6 +90,9 @@ export default function MaterialEntry() {
                   </td>
                   <td className="cb-td text-xs">{it?.uom || "-"}</td>
                   <td className="cb-td num text-right text-xs">{it ? usd(it.unit_cost) : "-"}</td>
+                  <td className="cb-td num text-right text-xs text-muted-foreground" data-testid={`${t}-planned-qty`}>
+                    {ln.planned_qty != null ? `${num(ln.planned_qty)} / ${num(ln.used_qty)}` : "-"}
+                  </td>
                   <td className="cb-td"><QtyInput testid={`${t}-qty-issued-input`} value={ln.qty_issued} onChange={(v) => e.setLine(i, { qty_issued: v })} /></td>
                   <td className="cb-td"><QtyInput testid={`${t}-qty-wasted-input`} value={ln.qty_wasted} onChange={(v) => e.setLine(i, { qty_wasted: v })} /></td>
                   <td className="cb-td"><QtyInput testid={`${t}-qty-returned-input`} value={ln.qty_returned} onChange={(v) => e.setLine(i, { qty_returned: v })} /></td>

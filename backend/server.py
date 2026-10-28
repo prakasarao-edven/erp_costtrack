@@ -232,6 +232,24 @@ async def autofill(type: Literal["labor", "equipment"], project_number: str, tas
     return {"plan": plan, "lines": await plan_rows(plan, type)}
 
 
+@api.get("/plans/material-autofill")
+async def material_autofill(project_number: str, task_number: str, date: str, member: dict = Depends(all_active())):
+    plan = await db.plans.find_one({"kind": "material", "status": "published", "project_number": project_number, "task_number": task_number,
+                                    "start_date": {"$lte": date}, "end_date": {"$gte": date}}, P)
+    if not plan:
+        return {"plan": None, "lines": []}
+    done = await db.transactions.find({"type": "material", "project_number": project_number, "task_number": task_number,
+                                       "status": {"$nin": ["draft", "rejected"]}, "date": {"$gte": plan["start_date"], "$lte": plan["end_date"]}},
+                                      {"_id": 0, "lines": 1}).to_list(10000)
+    lines = []
+    for ln in plan["lines"]:
+        used = sum(x.get("qty_consumed", 0) for d in done for x in d["lines"] if x["item_number"] == ln["item_number"])
+        remaining = max(round(ln["planned_qty"] - used, 2), 0)
+        lines.append({"item_number": ln["item_number"], "plan_line": True, "planned_qty": ln["planned_qty"], "used_qty": round(used, 2),
+                      "qty_issued": remaining or None, "qty_wasted": None, "qty_returned": None})
+    return {"plan": plan, "lines": lines}
+
+
 # ---------- Capture ----------
 class TxLine(BaseModel):
     resource_number: Optional[str] = None
