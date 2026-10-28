@@ -31,7 +31,8 @@ export default function MaterialEntry() {
         return toast.info("No published material plan covers this task and date - add items manually");
       }
       e.setMode("plan"); e.setPlanId(data.plan.id); e.setLines(data.lines);
-      toast.success(`Loaded ${data.lines.length} items from plan (issued = remaining planned qty)`);
+      const none = data.lines.filter((l) => !l.qty_issued).length;
+      toast.success(`Loaded ${data.lines.length} items from plan (issued = remaining planned qty)${none ? ` - ${none} already fully used this period, enter issued manually` : ""}`);
     } catch (err) { toast.error(errMsg(err)); }
   };
 
@@ -64,7 +65,7 @@ export default function MaterialEntry() {
           Mode: <span className="text-amber-400">{e.mode === "plan" ? "Auto-filled from published material plan" : "Manual entry"}</span>
         </span>
         <Button size="sm" variant="ghost" data-testid="material-add-line-btn"
-          onClick={() => e.setLines((ls) => [...ls, { item_number: "", qty_issued: null, qty_wasted: 0, qty_returned: 0 }])}>
+          onClick={() => e.setLines((ls) => [...ls, { item_number: "", qty_issued: null, qty_wasted: null, qty_returned: null }])}>
           <Plus className="mr-1 h-4 w-4" />Add item
         </Button>
       </div>
@@ -72,7 +73,7 @@ export default function MaterialEntry() {
         <table className="w-full" data-testid="material-lines-table">
           <thead><tr>
             <th className="cb-th">Item</th><th className="cb-th">UOM</th><th className="cb-th text-right">Unit cost (ERP)</th>
-            <th className="cb-th text-right">Planned / used</th>
+            <th className="cb-th text-right">Planned / used so far</th>
             <th className="cb-th text-right">Issued</th><th className="cb-th text-right">Wasted</th><th className="cb-th text-right">Returned</th>
             <th className="cb-th">Reason</th><th className="cb-th text-right">Consumed</th><th className="cb-th">vs Plan</th><th className="cb-th text-right">Cost</th><th className="cb-th" />
           </tr></thead>

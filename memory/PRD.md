@@ -31,6 +31,11 @@ Planning per Project#/Task#; plan auto-fill + exception mgmt; Budget check + Pla
 - Type-to-search pickers for employees/equipment/items (datalist)
 - NOT yet done: cost push to Oracle (awaiting user go-ahead + Transaction Source/Document config), task-level budget lines, equipment (non-labor resources) pull, worker grade mapping (defaults to "Skilled")
 
+## Implemented (2026-10-28, session 3) - bug fixes
+- Hid native number spinners app-wide (dark color-scheme); quantity fields render blank
+- Material Entry "Load from plan" (GET /api/plans/material-autofill): issued = remaining planned qty in period, Planned/used column
+- In progress (paused by user): first Oracle cost posting (UPC describe fetched; need valid Transaction Source/Document/ExpenditureType from tenant), task-level budget pull
+
 ## Backlog
 - P0: Connect Oracle tenant (credentials) and validate payload fields/Document Entry against tenant; map budget lines to task-level qty
 - P1: IoT/telematics + swipe/biometric auto-fill feeds; offline capture for site; Oracle inventory API for Return-to-Store; per-task tolerance overrides

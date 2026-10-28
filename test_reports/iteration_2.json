@@ -1,0 +1,30 @@
+{
+  "summary": "Retested 2 user-reported bugs + labor Load-from-plan regression. Bug 1 (number spinner boxes): FIXED - every input[type=number] on Material (6), Labor (4), Rate Cards (63), Setup (4) computes appearance=textfield, ::-webkit-inner-spin-button appearance none, root color-scheme dark; screenshots after hover/focus show no white spin boxes; typing 5/2/10/1.5 works; empty fields render blank. Planning hour/qty cells are type=number and covered by the same global CSS (not opened in UI this run). Bug 2 (Material Load from plan): FIXED - API GET /api/plans/material-autofill 7/7 pytest pass (auth 401, plan found with CEM-OPC53=400 & REBAR-GR60-25MM=15, issued=remaining, no plan -> {plan:null,lines:[]}, out-of-period, 422 missing params, preview works). UI: PRJ-1042/Civil-WBS-3/today -> 2 lines loaded, planned/used column shows '400 / 3,336' and '15 / 70', mode label 'Auto-filled from published material plan', edit issued -> preview cost updates ($95 + $1,230 = $1,325), Save draft OK (MAT-00006). MEP-WBS-7 -> info toast 'No published material plan covers this task and date - add items manually', mode stays Manual. Labor regression: Crew-A Load from plan -> 4 rows, 'Auto-filled from published plan', within tolerance.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "MaterialEntry Add item", "issue": "New manual line initialises qty_wasted:0 and qty_returned:0 so those inputs show '0' instead of blank (user asked to leave quantity fields blank). Load-from-plan lines correctly use null.", "selector": "[data-testid='material-add-line-btn']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Material Entry", "issues": ["'Planned / used' column shows planned/used while 'vs Plan' badge shows used/planned - inverted order is confusing", "Because seeded plan is already over-consumed by earlier test data (used 3,336 of 400), Issued prefills blank (remaining 0) - expected per logic but user gets no hint why issued is empty", "Submit for approval stays enabled while validation panel lists blocking errors (e.g. 'quantity issued must be greater than 0') - preview.validation.blocked may not be set for these"]},
+      {"screen": "Global toast", "issues": ["Sonner top-right toast overlaps the header user name / Oracle connected pill"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_material_autofill.py", "/app/test_reports/pytest/pytest_iter2.xml"],
+  "action_items": [
+    "Optional: initialise qty_wasted/qty_returned as null in MaterialEntry 'Add item' so fields are blank",
+    "Optional: make Planned/used column order consistent with vs Plan badge; show hint when remaining planned qty is 0",
+    "Optional: disable Submit when validation errors are listed (or confirm backend rejects)"
+  ],
+  "critical_code_review_comments": [
+    "RateCards add-rate multiplier/premium inputs lack data-testid",
+    "No DELETE endpoint for transactions - test drafts (MAT-00006) cannot be cleaned up"
+  ],
+  "updated_files": ["/app/backend/tests/test_material_autofill.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "Draft material transaction MAT-00006 (admin, PRJ-1042/Civil-WBS-3, notes 'TEST_iter2 material load plan'); not submitted, no delete endpoint.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Tickets: python3 scripts/test_users.py --tickets > /tmp/tickets.txt and json.load in browser script. Sel components are native <select> (use select_option). Material plan for PRJ-1042/Civil-WBS-3 is heavily over-consumed by test data so issued prefill is blank; autofill math verified in test_material_autofill.py."
+}
