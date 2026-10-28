@@ -24,6 +24,13 @@ Planning per Project#/Task#; plan auto-fill + exception mgmt; Budget check + Pla
 - Oracle adapter + cost queue + batch log + payload view (NOT yet connected - credentials pending)
 - Testing: iteration_1 backend 22/22 + 5 bug repros fixed; frontend flows pass
 
+## Implemented (2026-10-28, session 2) - Oracle connected
+- Oracle creds saved (test tenant fa-eubg-test-saasfademo1). Adapter strips stray whitespace from URL
+- Connection test 200; master-data pull runs as background job with batch log polling
+- Pulled: 270 active projects, ~3,380 tasks, 6,552 workers, 271 items (TotalUnitCost/UOMName, latest per item), 603 budget versions; closed projects excluded
+- Type-to-search pickers for employees/equipment/items (datalist)
+- NOT yet done: cost push to Oracle (awaiting user go-ahead + Transaction Source/Document config), task-level budget lines, equipment (non-labor resources) pull, worker grade mapping (defaults to "Skilled")
+
 ## Backlog
 - P0: Connect Oracle tenant (credentials) and validate payload fields/Document Entry against tenant; map budget lines to task-level qty
 - P1: IoT/telematics + swipe/biometric auto-fill feeds; offline capture for site; Oracle inventory API for Return-to-Store; per-task tolerance overrides

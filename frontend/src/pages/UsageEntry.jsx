@@ -1,10 +1,11 @@
+import { useMemo } from "react";
 import { Plus, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { useApp } from "@/context/AppContext";
 import { useEntry } from "@/hooks/useEntry";
 import { errMsg, num, usd } from "@/lib/api";
-import { Field, PageHeader, ProjectTaskFields, Sel, StatusBadge } from "@/components/common";
+import { DataList, Field, PageHeader, Pick, ProjectTaskFields, Sel, StatusBadge } from "@/components/common";
 import ValidationPanel from "@/components/ValidationPanel";
 import RecentEntries from "@/components/RecentEntries";
 
@@ -15,7 +16,7 @@ const TEXT = {
     desc: "Capture Active, Idle, Maintenance and Downtime hours, each on its own rate. Downtime and maintenance need a reason code and route to special approval." },
 };
 
-const LineRow = ({ i, ln, pv, type, e, resources, hourTypes, reasons }) => {
+const LineRow = ({ i, ln, pv, type, e, resOptions, hourTypes, reasons }) => {
   const isPlan = ln.plan_line;
   const t = `${type}-line-${i}`;
   return (
@@ -28,9 +29,8 @@ const LineRow = ({ i, ln, pv, type, e, resources, hourTypes, reasons }) => {
       </td>
       <td className="cb-td min-w-[170px]">
         {isPlan ? <span>{pv?.resource_name || ln.resource_number} <span className="num text-xs text-muted-foreground">{ln.resource_number}</span></span> : (
-          <Sel data-testid={`${t}-resource-select`} value={ln.resource_number || ""} placeholder="Select"
-            onChange={(ev) => e.setLine(i, { resource_number: ev.target.value })}
-            options={resources.map((r) => ({ value: r.number, label: `${r.number} - ${r.name}` }))} />
+          <Pick listId={`${type}-res-list`} testid={`${t}-resource-select`} value={ln.resource_number || ""} options={resOptions}
+            onChange={(v) => e.setLine(i, { resource_number: v })} />
         )}
       </td>
       <td className="cb-td min-w-[140px]">
@@ -68,6 +68,7 @@ export default function UsageEntry({ type }) {
   const e = useEntry(type);
   const tx = TEXT[type];
   const resources = type === "labor" ? master.employees : master.equipment;
+  const resOptions = useMemo(() => resources.map((r) => ({ value: r.number, label: `${r.number} - ${r.name}` })), [resources]);
   const hourTypes = master.hour_types.filter((h) => h.resource_type === type);
   const reasons = master.reason_codes.filter((r) => r.resource_type === "equipment");
   const crews = master.crews.filter((c) => !e.header.project_number || c.project_number === e.header.project_number);
@@ -134,12 +135,13 @@ export default function UsageEntry({ type }) {
               <tr><td colSpan={11} className="p-8 text-center text-sm text-muted-foreground">Load from plan, or add rows for manual entry.</td></tr>
             )}
             {e.lines.map((ln, i) => (
-              <LineRow key={i} i={i} ln={ln} pv={e.preview?.lines?.[i]} type={type} e={e} resources={resources} hourTypes={hourTypes} reasons={reasons} />
+              <LineRow key={i} i={i} ln={ln} pv={e.preview?.lines?.[i]} type={type} e={e} resOptions={resOptions} hourTypes={hourTypes} reasons={reasons} />
             ))}
           </tbody>
         </table>
       </div>
 
+      <DataList id={`${type}-res-list`} options={resOptions} />
       <ValidationPanel tx={e.preview} />
       <div className="mt-6 flex flex-wrap items-center gap-3">
         <Button variant="outline" disabled={e.busy || locked || !e.lines.length} onClick={() => e.save("draft")} data-testid={`${type}-save-draft-btn`}>Save draft</Button>

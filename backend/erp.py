@@ -1,10 +1,12 @@
 """ERP adapter layer. Oracle Fusion PPM is implemented; SAP plugs in via the same interface."""
+import asyncio
 import os
 from typing import Protocol
 
 import httpx
 
 API_VERSION = "11.13.18.05"
+CLOSED = {"Closed", "Completed", "Rejected", "Cancelled"}
 
 
 class ErpAdapter(Protocol):
@@ -18,8 +20,8 @@ class OracleFusionAdapter:
     name = "Oracle Fusion PPM"
 
     def __init__(self, base: str, user: str, password: str):
-        self.base = base.rstrip("/")
-        self.auth = (user, password)
+        self.base = "".join(base.split()).rstrip("/")
+        self.auth = (user.strip(), password)
 
     def _url(self, service: str, resource: str) -> str:
         return f"{self.base}/{service}/resources/{API_VERSION}/{resource}"
@@ -47,17 +49,20 @@ class OracleFusionAdapter:
     async def pull(self, entity: str) -> list[dict]:
         if entity == "projects":
             rows = await self._get_all("fscmRestApi", "projects", {"fields": "ProjectId,ProjectNumber,ProjectName,ProjectStatus,BusinessUnitName"})
-            return [{"number": r.get("ProjectNumber"), "name": r.get("ProjectName"), "erp_id": r.get("ProjectId"),
-                     "client": r.get("BusinessUnitName") or "", "status": r.get("ProjectStatus") or ""} for r in rows if r.get("ProjectNumber")]
+            return [{"number": r.get("ProjectNumber"), "name": (r.get("ProjectName") or "").strip(), "erp_id": r.get("ProjectId"),
+                     "client": r.get("BusinessUnitName") or "", "status": r.get("ProjectStatus") or ""}
+                    for r in rows if r.get("ProjectNumber") and r.get("ProjectStatus") not in CLOSED]
         if entity == "tasks":
             projects = await self.pull("projects")
-            out = []
-            for p in projects:
-                rows = await self._get_all("fscmRestApi", f"projects/{p['erp_id']}/child/Tasks", {"fields": "TaskNumber,TaskName"})
-                out += [{"project_number": p["number"], "number": r.get("TaskNumber"), "name": r.get("TaskName")} for r in rows if r.get("TaskNumber")]
-            return out
+            sem = asyncio.Semaphore(8)
+
+            async def one(p):
+                async with sem:
+                    rows = await self._get_all("fscmRestApi", f"projects/{p['erp_id']}/child/Tasks", {"fields": "TaskNumber,TaskName"})
+                return [{"project_number": p["number"], "number": r.get("TaskNumber"), "name": r.get("TaskName")} for r in rows if r.get("TaskNumber")]
+            return [t for chunk in await asyncio.gather(*(one(p) for p in projects)) for t in chunk]
         if entity == "employees":
-            rows = await self._get_all("hcmRestApi", "workers", {"expand": "names", "fields": "PersonNumber;names:DisplayName"})
+            rows = await self._get_all("hcmRestApi", "workers", {"expand": "names", "fields": "PersonNumber;names:DisplayName"}, cap=50000)
             out = []
             for r in rows:
                 names = (r.get("names") or [])
@@ -66,14 +71,23 @@ class OracleFusionAdapter:
                             "grade": "Skilled", "trade": ""})
             return [o for o in out if o["number"]]
         if entity == "items":
-            rows = await self._get_all("fscmRestApi", "itemCosts")
-            return [{"number": r.get("ItemNumber"), "description": r.get("ItemDescription") or r.get("ItemNumber"),
-                     "uom": r.get("UOMCode") or r.get("UnitOfMeasure") or "EA",
-                     "unit_cost": float(r.get("UnitCost") or r.get("Cost") or 0), "category": r.get("CostBook") or ""} for r in rows if r.get("ItemNumber")]
+            rows = await self._get_all("fscmRestApi", "itemCosts", cap=50000)
+            latest = {}
+            for r in rows:  # one row per item: most recent cost across cost orgs
+                n = r.get("ItemNumber")
+                if n and (n not in latest or (r.get("CostAsOfDate") or "") > (latest[n].get("CostAsOfDate") or "")):
+                    latest[n] = r
+            return [{"number": n, "description": r.get("ItemDescription") or n, "uom": r.get("UOMName") or r.get("UOMCode") or "Ea",
+                     "unit_cost": float(r.get("TotalUnitCost") or 0), "category": r.get("ItemCategory") or "",
+                     "cost_org": r.get("CostOrganizationName") or "", "currency": r.get("CurrencyCode") or "USD"} for n, r in latest.items()]
         if entity == "budgets":
             rows = await self._get_all("fscmRestApi", "projectBudgets", {"q": "PlanVersionStatus='Current Baseline'"})
-            return [{"project_number": r.get("ProjectNumber"), "erp_id": r.get("PlanVersionId"),
-                     "total_cost": float(r.get("TotalPlannedRawCostInProjectCurrency") or r.get("PCRawCostAmounts") or 0)} for r in rows]
+            seen = {}
+            for r in rows:
+                seen[(r.get("ProjectNumber"), r.get("PlanVersionId"))] = {
+                    "project_number": r.get("ProjectNumber"), "erp_id": r.get("PlanVersionId"),
+                    "total_cost": float(r.get("TotalPlannedRawCostInProjectCurrency") or r.get("PCRawCostAmounts") or 0)}
+            return list(seen.values())
         raise ValueError(f"Unsupported entity {entity}")
 
     async def push_cost(self, payload: dict) -> dict:

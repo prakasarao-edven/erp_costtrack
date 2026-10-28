@@ -31,8 +31,17 @@ export default function ErpSync() {
     try { const r = await fn(); toast.success(okMsg(r.data)); await load(); } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
   };
   const test = () => run(() => api.post("/erp/test"), (d) => (d.ok ? "Connection OK" : `Connection failed (${d.status}) ${d.message}`));
-  const sync = (entities) => run(async () => { const r = await api.post("/erp/sync", { entities }); await reloadMaster(); return r; },
-    (d) => d.map((b) => `${b.entity}: ${b.status} (${b.count})`).join(" · "));
+  const sync = (entities) => run(() => api.post("/erp/sync", { entities }), () => "Sync started - progress shows in the batch log below");
+  const running = batches.some((b) => b.status === "running");
+  useEffect(() => {
+    if (!running) return undefined;
+    const t = setInterval(async () => {
+      const { data } = await api.get("/erp/batches");
+      setBatches(data);
+      if (!data.some((b) => b.status === "running")) { reloadMaster(); toast.success("Master data sync finished"); }
+    }, 4000);
+    return () => clearInterval(t);
+  }, [running, api, reloadMaster]);
   const push = () => run(() => api.post("/erp/push"), (d) => `Pushed ${d.ok}/${d.count} cost lines${d.failed ? `, ${d.failed} failed` : ""}`);
 
   if (!st) return <Loading />;
@@ -52,9 +61,9 @@ export default function ErpSync() {
         <div className="cb-card p-5">
           <div className="cb-eyebrow mb-3">Pull master data</div>
           <div className="flex flex-wrap gap-2">
-            {ENTITIES.map(([k, l]) => <Button key={k} size="sm" variant="outline" disabled={!st.connected || !admin || busy} onClick={() => sync([k])} data-testid={`erp-sync-${k}-btn`}>{l}</Button>)}
+            {ENTITIES.map(([k, l]) => <Button key={k} size="sm" variant="outline" disabled={!st.connected || !admin || busy || running} onClick={() => sync([k])} data-testid={`erp-sync-${k}-btn`}>{l}</Button>)}
           </div>
-          <Button className="mt-3" size="sm" disabled={!st.connected || !admin || busy} onClick={() => sync(ENTITIES.map(([k]) => k))} data-testid="erp-sync-master-data-btn">
+          <Button className="mt-3" size="sm" disabled={!st.connected || !admin || busy || running} onClick={() => sync(ENTITIES.map(([k]) => k))} data-testid="erp-sync-master-data-btn">
             <DownloadCloud className="mr-1.5 h-4 w-4" />Sync all
           </Button>
         </div>

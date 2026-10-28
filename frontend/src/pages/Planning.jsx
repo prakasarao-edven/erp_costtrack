@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useApp } from "@/context/AppContext";
-import { Field, PageHeader, ProjectTaskFields, Sel, StatusBadge } from "@/components/common";
+import { DataList, Field, PageHeader, Pick, ProjectTaskFields, Sel, StatusBadge } from "@/components/common";
 import { errMsg, today, usd, useApi } from "@/lib/api";
 import NewCrewDialog from "@/components/NewCrewDialog";
 
@@ -33,6 +33,10 @@ const PlanList = ({ plans, onOpen, crews, activeId }) => (
 
 const CrewGrid = ({ plan, setPlan, master }) => {
   const htFor = (rt) => master.hour_types.filter((h) => h.resource_type === rt).map((h) => h.code);
+  const opts = {
+    labor: master.employees.map((r) => ({ value: r.number, label: `${r.number} - ${r.name}` })),
+    equipment: master.equipment.map((r) => ({ value: r.number, label: `${r.number} - ${r.name}` })),
+  };
   const setLine = (i, patch) => setPlan((p) => ({ ...p, lines: p.lines.map((l, j) => (j === i ? { ...l, ...patch } : l)) }));
   return (
     <div className="cb-card overflow-x-auto">
@@ -42,14 +46,14 @@ const CrewGrid = ({ plan, setPlan, master }) => {
           {plan.lines.length === 0 && <tr><td colSpan={8} className="p-6 text-center text-sm text-muted-foreground">Add employees and equipment to this crew plan.</td></tr>}
           {plan.lines.map((ln, i) => {
             const allowed = htFor(ln.resource_type);
-            const opts = (ln.resource_type === "labor" ? master.employees : master.equipment).map((r) => ({ value: r.number, label: `${r.number} - ${r.name}` }));
             return (
               <tr key={i} className="cb-row">
                 <td className="cb-td min-w-[230px]">
                   <div className="flex gap-2">
                     <Sel className="w-28" data-testid={`plan-line-${i}-type-select`} value={ln.resource_type} onChange={(e) => setLine(i, { resource_type: e.target.value, resource_number: "", hours: {} })}
                       options={[{ value: "labor", label: "Labor" }, { value: "equipment", label: "Equip." }]} />
-                    <Sel data-testid={`plan-line-${i}-resource-select`} value={ln.resource_number} placeholder="Select" onChange={(e) => setLine(i, { resource_number: e.target.value })} options={opts} />
+                    <Pick key={ln.resource_type} listId={`plan-${ln.resource_type}-list`} testid={`plan-line-${i}-resource-select`} value={ln.resource_number}
+                      options={opts[ln.resource_type]} onChange={(v) => setLine(i, { resource_number: v })} />
                   </div>
                 </td>
                 {COLS.map(([c]) => (
@@ -67,6 +71,8 @@ const CrewGrid = ({ plan, setPlan, master }) => {
           })}
         </tbody>
       </table>
+      <DataList id="plan-labor-list" options={opts.labor} />
+      <DataList id="plan-equipment-list" options={opts.equipment} />
     </div>
   );
 };
@@ -74,6 +80,7 @@ const CrewGrid = ({ plan, setPlan, master }) => {
 const MaterialGrid = ({ plan, setPlan, master }) => {
   const setLine = (i, patch) => setPlan((p) => ({ ...p, lines: p.lines.map((l, j) => (j === i ? { ...l, ...patch } : l)) }));
   const total = plan.lines.reduce((s, l) => s + (l.planned_qty || 0) * (master.items.find((x) => x.number === l.item_number)?.unit_cost || 0), 0);
+  const itemOpts = master.items.map((x) => ({ value: x.number, label: `${x.number} - ${x.description}` }));
   return (
     <div className="cb-card overflow-x-auto">
       <table className="w-full" data-testid="material-plan-grid">
@@ -84,8 +91,8 @@ const MaterialGrid = ({ plan, setPlan, master }) => {
             const it = master.items.find((x) => x.number === ln.item_number);
             return (
               <tr key={i} className="cb-row">
-                <td className="cb-td min-w-[240px]"><Sel data-testid={`mplan-line-${i}-item-select`} value={ln.item_number || ""} placeholder="Select item"
-                  onChange={(e) => setLine(i, { item_number: e.target.value })} options={master.items.map((x) => ({ value: x.number, label: `${x.number} - ${x.description}` }))} /></td>
+                <td className="cb-td min-w-[240px]"><Pick listId="mplan-item-list" testid={`mplan-line-${i}-item-select`} value={ln.item_number || ""}
+                  onChange={(v) => setLine(i, { item_number: v })} options={itemOpts} /></td>
                 <td className="cb-td text-xs">{it?.uom || "-"}</td>
                 <td className="cb-td num text-right">{it ? usd(it.unit_cost) : "-"}</td>
                 <td className="cb-td w-32"><input type="number" min="0" className="cb-input num text-right" data-testid={`mplan-line-${i}-qty-input`} value={ln.planned_qty ?? ""}
@@ -99,6 +106,7 @@ const MaterialGrid = ({ plan, setPlan, master }) => {
             <td className="cb-td num text-right font-semibold" data-testid="material-plan-total">{usd(total)}</td><td /></tr>
         </tbody>
       </table>
+      <DataList id="mplan-item-list" options={itemOpts} />
     </div>
   );
 };

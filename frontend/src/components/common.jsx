@@ -1,4 +1,28 @@
+import { useEffect, useState } from "react";
 import { useApp } from "@/context/AppContext";
+
+// Type-to-search picker backed by one shared <datalist> per page (thousands of ERP records).
+export const DataList = ({ id, options }) => (
+  <datalist id={id}>{options.map((o) => <option key={o.value} value={o.label} />)}</datalist>
+);
+
+export const Pick = ({ listId, options, value, onChange, testid, placeholder = "Type to search" }) => {
+  const labelOf = (v) => options.find((o) => o.value === v)?.label || v || "";
+  const [text, setText] = useState(labelOf(value));
+  useEffect(() => {
+    if (value) setText(labelOf(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  return (
+    <input list={listId} className="cb-input" data-testid={testid} placeholder={placeholder} value={text}
+      onChange={(e) => {
+        const t = e.target.value;
+        setText(t);
+        const m = options.find((o) => o.label === t || o.value === t);
+        onChange(m ? m.value : "");
+      }} />
+  );
+};
 
 const BADGE = {
   draft: ["Draft", "bg-slate-500/15 text-slate-300 border-slate-500/30"],
@@ -25,6 +49,7 @@ const BADGE = {
   recorded: ["Recorded", "bg-slate-500/15 text-slate-300 border-slate-500/30"],
   sample: ["Sample - not sent", "bg-slate-500/15 text-slate-400 border-slate-500/30"],
   success: ["Success", "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"],
+  running: ["Running...", "bg-blue-500/15 text-blue-300 border-blue-500/30"],
   partial: ["Partial", "bg-amber-500/15 text-amber-300 border-amber-500/30"],
 };
 

@@ -1,5 +1,8 @@
+import asyncio
 import logging
 import os
+
+from pymongo import UpdateOne
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
@@ -21,6 +24,7 @@ except ModuleNotFoundError:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 app = FastAPI(title="CostBridge")
 api = APIRouter(prefix="/api")
@@ -39,6 +43,7 @@ def all_active():
 @app.on_event("startup")
 async def startup():
     await seed()
+    await db.erp_batches.update_many({"status": "running"}, {"$set": {"status": "error", "error": "Interrupted by server restart"}})
     await db.transactions.create_index("id", unique=True)
     await db.users.create_index("user_id", unique=True)
 
@@ -618,24 +623,31 @@ async def erp_sync(body: SyncIn, member: dict = Depends(require_role("admin"))):
     a = get_adapter()
     if not a:
         raise HTTPException(400, "Oracle connection is not configured")
-    results = []
-    for ent in body.entities:
-        batch = {"id": new_id(), "direction": "pull", "entity": ent, "started_at": now_iso(), "by": member.get("name")}
+    if await db.erp_batches.find_one({"direction": "pull", "status": "running"}):
+        raise HTTPException(409, "A master data sync is already running")
+    batches = [{"id": new_id(), "direction": "pull", "entity": ent, "started_at": now_iso(), "by": member.get("name"), "status": "running", "count": 0}
+               for ent in body.entities]
+    await db.erp_batches.insert_many([dict(b) for b in batches])
+    asyncio.create_task(_run_sync(a, batches))
+    await audit("erp", "sync", "master data pull started", member, {"entities": body.entities})
+    return batches
+
+
+async def _run_sync(a, batches: list[dict]):
+    for b in batches:
+        upd = {}
         try:
-            rows = await a.pull(ent)
-            coll, keys = KEYS[ent]
-            for r in rows:
-                await db[coll].update_one({k: r[k] for k in keys}, {"$set": {**r, "source": "oracle", "synced_at": now_iso()},
-                                                                   "$setOnInsert": {"id": new_id()}}, upsert=True)
-            batch.update(status="success", count=len(rows))
+            rows = await a.pull(b["entity"])
+            coll, keys = KEYS[b["entity"]]
+            ops = [UpdateOne({k: r[k] for k in keys}, {"$set": {**r, "source": "oracle", "synced_at": now_iso()}, "$setOnInsert": {"id": new_id()}}, upsert=True)
+                   for r in rows]
+            for i in range(0, len(ops), 1000):
+                await db[coll].bulk_write(ops[i:i + 1000], ordered=False)
+            upd = {"status": "success", "count": len(rows)}
         except Exception as e:
-            batch.update(status="error", count=0, error=str(e)[:500])
-        batch["finished_at"] = now_iso()
-        await db.erp_batches.insert_one(batch)
-        batch.pop("_id", None)
-        results.append(batch)
-    await audit("erp", "sync", "master data pull", member, {"entities": body.entities})
-    return results
+            logger.exception("ERP sync %s failed", b["entity"])
+            upd = {"status": "error", "error": str(e)[:500]}
+        await db.erp_batches.update_one({"id": b["id"]}, {"$set": {**upd, "finished_at": now_iso()}})
 
 
 @api.post("/erp/push")

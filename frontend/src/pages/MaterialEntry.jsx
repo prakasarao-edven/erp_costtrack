@@ -1,9 +1,10 @@
+import { useMemo } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useApp } from "@/context/AppContext";
 import { useEntry } from "@/hooks/useEntry";
 import { num, usd } from "@/lib/api";
-import { Field, PageHeader, ProjectTaskFields, Sel, StatusBadge } from "@/components/common";
+import { DataList, Field, PageHeader, Pick, ProjectTaskFields, StatusBadge, Sel } from "@/components/common";
 import ValidationPanel from "@/components/ValidationPanel";
 import RecentEntries from "@/components/RecentEntries";
 
@@ -17,6 +18,7 @@ export default function MaterialEntry() {
   const e = useEntry("material");
   const reasons = master.reason_codes.filter((r) => r.resource_type === "material");
   const locked = !!e.editing && !["draft", "rejected"].includes(e.editing.status);
+  const itemOptions = useMemo(() => master.items.map((x) => ({ value: x.number, label: `${x.number} - ${x.description}` })), [master.items]);
 
   return (
     <div>
@@ -61,8 +63,8 @@ export default function MaterialEntry() {
               return (
                 <tr key={i} className="cb-row">
                   <td className="cb-td min-w-[220px]">
-                    <Sel data-testid={`${t}-item-select`} value={ln.item_number} placeholder="Select item" onChange={(ev) => e.setLine(i, { item_number: ev.target.value })}
-                      options={master.items.map((x) => ({ value: x.number, label: `${x.number} - ${x.description}` }))} />
+                    <Pick listId="material-item-list" testid={`${t}-item-select`} value={ln.item_number} options={itemOptions}
+                      onChange={(v) => e.setLine(i, { item_number: v })} />
                   </td>
                   <td className="cb-td text-xs">{it?.uom || "-"}</td>
                   <td className="cb-td num text-right text-xs">{it ? usd(it.unit_cost) : "-"}</td>
@@ -86,6 +88,7 @@ export default function MaterialEntry() {
           </tbody>
         </table>
       </div>
+      <DataList id="material-item-list" options={itemOptions} />
       <ValidationPanel tx={e.preview} />
       <div className="mt-6 flex flex-wrap gap-3">
         <Button variant="outline" disabled={e.busy || locked || !e.lines.length} onClick={() => e.save("draft")} data-testid="material-save-draft-btn">Save draft</Button>
