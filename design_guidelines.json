@@ -1,0 +1,236 @@
+{
+  "project_name": "CostBridge",
+  "vendor_name": "Edvenswa Technologies",
+  "archetype": "THE PERFORMANCE PRO / INDUSTRIAL SAAS TACTICAL MINIMALISM",
+  "app_type": "Enterprise EPC SaaS App (Data-Dense Dashboard & Operations Hub)",
+  "theme_strategy": {
+    "default_mode": "dark",
+    "theme_toggle_supported": true,
+    "dark_theme_palette": {
+      "background": "#0B0F17",
+      "surface": "#111827",
+      "surface_elevated": "#1F2937",
+      "border": "#374151",
+      "border_subtle": "rgba(255, 255, 255, 0.08)",
+      "primary": "#F59E0B",
+      "primary_foreground": "#000000",
+      "secondary": "#3B82F6",
+      "secondary_foreground": "#FFFFFF",
+      "accent_emerald": "#10B981",
+      "accent_amber": "#F59E0B",
+      "accent_rose": "#EF4444",
+      "accent_cyan": "#06B6D4",
+      "text_primary": "#F9FAFB",
+      "text_secondary": "#9CA3AF",
+      "text_muted": "#6B7280"
+    },
+    "light_theme_palette": {
+      "background": "#F8FAFC",
+      "surface": "#FFFFFF",
+      "surface_elevated": "#F1F5F9",
+      "border": "#E2E8F0",
+      "border_subtle": "rgba(0, 0, 0, 0.08)",
+      "primary": "#D97706",
+      "primary_foreground": "#FFFFFF",
+      "secondary": "#2563EB",
+      "secondary_foreground": "#FFFFFF",
+      "accent_emerald": "#059669",
+      "accent_amber": "#D97706",
+      "accent_rose": "#DC2626",
+      "accent_cyan": "#0891B2",
+      "text_primary": "#0F172A",
+      "text_secondary": "#475569",
+      "text_muted": "#64748B"
+    }
+  },
+  "typography": {
+    "headings": {
+      "font_family": "Outfit, sans-serif",
+      "h1": "text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight",
+      "h2": "text-2xl sm:text-3xl font-bold tracking-tight",
+      "h3": "text-lg sm:text-xl font-semibold tracking-normal",
+      "h4": "text-base font-semibold"
+    },
+    "body": {
+      "font_family": "Inter, sans-serif",
+      "size": "text-sm sm:text-base leading-relaxed"
+    },
+    "numeric_tables": {
+      "font_family": "JetBrains Mono, monospace",
+      "usage": "Use for all numerical values, monetary amounts in USD, hour totals, tolerance percentages, batch IDs, and meters."
+    },
+    "labels_eyebrows": {
+      "style": "uppercase tracking-[0.18em] text-xs font-semibold text-amber-500/90"
+    }
+  },
+  "layout_architecture": {
+    "structure": "Fixed Left Sidebar (width 256px on desktop, collapsible on mobile) + Fixed Top Navigation Bar + Dynamic Content Canvas with Sticky Page Headers.",
+    "sidebar_navigation": [
+      { "id": "dashboard", "label": "Dashboard", "icon": "LayoutDashboard", "badge": null },
+      { "id": "planning", "label": "Crew & Material Plan", "icon": "CalendarDays", "badge": "Active" },
+      { "id": "labor-entry", "label": "Labor Entry & Timesheet", "icon": "UserCheck", "badge": null },
+      { "id": "equipment-entry", "label": "Equipment Usage", "icon": "Truck", "badge": null },
+      { "id": "material-entry", "label": "Material Issues", "icon": "Boxes", "badge": null },
+      { "id": "approvals", "label": "Approvals Queue", "icon": "CheckSquare", "badge": "5 Pending" },
+      { "id": "rate-cards", "label": "Master Rate Cards", "icon": "CreditCard", "badge": null },
+      { "id": "setup", "label": "Tolerance Setup", "icon": "SlidersHorizontal", "badge": null },
+      { "id": "reports", "label": "Variance Reports", "icon": "FileSpreadsheet", "badge": null },
+      { "id": "erp-integration", "label": "Oracle / ERP Sync", "icon": "Database", "badge": "Oracle Connected" },
+      { "id": "users-admin", "label": "Users & Roles", "icon": "ShieldCheck", "badge": null }
+    ],
+    "top_bar": {
+      "elements": [
+        "Brand Logo (CostBridge by Edvenswa)",
+        "Global Active Project Switcher Dropdown (e.g. 'PRJ-2026-088: Metro Line Expansion (Phase 2)')",
+        "Role Switcher (Field Foreman, Project Manager, Cost Controller, Admin)",
+        "ERP Connection Status Pill (Green dot: Oracle Fusion PPM Live)",
+        "Notifications Bell with indicator",
+        "User Avatar & Profile Dropdown"
+      ]
+    }
+  },
+  "key_screens_and_components": {
+    "screen_1_dashboard": {
+      "name": "Budget vs Actual Executive Dashboard",
+      "components": [
+        "KPI Cards: Total Project Budget ($14.2M), Total Actual Spent ($9.85M), Overall Cost Variance (-$340K / Over), Pending Approvals ($124.5K)",
+        "Budget vs Actual Cost Breakdown Table with progress bars (Status: OK green <=80%, Warning amber 80-100%, Stopped red >100%)",
+        "Cost Breakdown by Category Chart (Labor, Heavy Equipment, Raw Material)",
+        "ERP Sync Status Widget with last sync timestamp & manual trigger button"
+      ]
+    },
+    "screen_2_crew_planning": {
+      "name": "Crew & Resource Planning Grid",
+      "components": [
+        "Filters: Project, Date Range Picker, Shift selector (Day/Night/Overtime), Foreman Team",
+        "Matrix Grid: Resources x Hour Types (Regular Hours, Overtime OT1.5, OT2.0, Idle Time, Harsh Weather, Maintenance Downtime)",
+        "Material Allocation Sub-grid: Planned Quantity, Unit of Measure, Batch Assignment",
+        "Action Bar: 'Save Draft' button, 'Publish Plan to Foremen' button, 'Auto-fill from Baseline' action"
+      ]
+    },
+    "screen_3_labor_timesheet": {
+      "name": "Labor Entry & Timesheet Capture",
+      "components": [
+        "Foreman Quick-Check Matrix: Auto-filled from daily crew plan",
+        "Resource Row: Avatar, Craft/Trade, Present Checkbox, Planned Hours vs Actual Hours input, vs-Plan % Diff, Tolerance Status Badge (OK / Warning / Exception)",
+        "Manual Bulk Entry Drawer for ad-hoc craft hires",
+        "Supervisor Sign-off canvas / Digital acknowledgement button"
+      ]
+    },
+    "screen_4_equipment_entry": {
+      "name": "Equipment Usage & Downtime Capture",
+      "components": [
+        "Equipment Fleet Table: Asset ID (e.g., EX-402 Caterpillar Excavator), Category, Operator Name, Start/End Hour Meter reading, Total Operating Hours",
+        "Downtime & Reason Code Selector: Maintenance, Weather Delay, Fueling, Operator Idle, Site Obstruction",
+        "Special Approval Flag toggle for non-budgeted equipment usage",
+        "Fuel Consumption & Maintenance log fields"
+      ]
+    },
+    "screen_5_material_entry": {
+      "name": "Material Consumption & Issue Log",
+      "components": [
+        "Material Issue Form & Grid: Item Code (e.g., REBAR-GR60-25MM), Description, Unit of Measure, Quantity Issued, Quantity Wasted, Quantity Returned to Stock",
+        "Storage Location / Warehouse Yard dropdown selector",
+        "Batch / Heat Number tracking input",
+        "Unit Cost & Total Cost Calculation widget"
+      ]
+    },
+    "screen_6_approvals": {
+      "name": "Multi-Level Approvals Queue",
+      "components": [
+        "Filter Tabs: All (5), Pending Level 1 Foreman (2), Pending Level 2 PM (2), Special Exception (1)",
+        "Approval Cards / Rows: Batch Summary, Creator, Cost Impact, Approval Step Progress (Step 1 of 2 vs Special Approval required)",
+        "Action Controls: Inline Approve & Post to Oracle PPM, Reject with Required Reason Modal, Request Re-entry"
+      ]
+    },
+    "screen_7_rate_cards": {
+      "name": "Master Rate Cards & Cost Rules",
+      "components": [
+        "Labor Rate Card Table: Trade Category (Journeyman Electrician, Heavy Crane Operator), Regular Base Rate ($/hr), OT Multipliers, Shift Differential",
+        "Equipment Hourly Rate Table: Asset Model, Internal Rate ($/hr), Rental Rate ($/hr), Fuel Surcharge Rate",
+        "Material Standard Cost Registry",
+        "Currency & Index Adjustment Rule Configurator (USD default)"
+      ]
+    },
+    "screen_8_setup_config": {
+      "name": "System Configuration & Tolerance Engine",
+      "components": [
+        "Tolerance Threshold Rules: Soft Warning % (e.g., +5%), Hard Stop Threshold % (e.g., +15%)",
+        "Auto-Approval Scope Rules: Auto-approve timesheets within 2% of plan",
+        "Notification Triggers: Email / In-App alerts for budget overrun",
+        "Reason Codes Management Table"
+      ]
+    },
+    "screen_9_reports": {
+      "name": "Variance Analysis & Cost Export",
+      "components": [
+        "Cost Variance Summary Matrix (Planned vs Actual vs Variance $ and %)",
+        "Daily Labor & Equipment Utilization Heatmap",
+        "Export Bar: CSV, Excel, PDF Export buttons",
+        "Custom Filter Builder by Cost Code & WBS Level"
+      ]
+    },
+    "screen_10_erp_integration": {
+      "name": "Oracle Fusion PPM & ERP Connector",
+      "components": [
+        "Connection Health Card: Oracle Fusion PPM REST API Endpoint, OAuth 2.0 Token Status, Last Master Data Sync",
+        "Master Data Sync Actions: Sync Projects, Sync WBS/Cost Codes, Sync Employee Roster, Sync Equipment Assets",
+        "Push Batch Audit Log Table: Batch ID, Timestamp, Records Pushed, Oracle Status Code (HTTP 200 OK / Error), Error Retry trigger button"
+      ]
+    },
+    "screen_11_users_roles": {
+      "name": "User Access & Role Management",
+      "components": [
+        "User Table: Avatar, Name, Email, Role (Field Foreman, Project Manager, Cost Controller, System Admin), Assigned Projects, Status",
+        "Role Permissions Matrix (Read/Write/Approve per module)",
+        "Invite User Modal & Clerk Sign-in Integration indicator"
+      ]
+    }
+  },
+  "testing_and_accessibility": {
+    "data_testid_rules": "All interactive elements (buttons, inputs, dropdowns, modals, tabs, check boxes, status badges) MUST have explicit data-testid attributes in kebab-case format.",
+    "sample_test_ids": [
+      "data-testid='sidebar-nav-dashboard'",
+      "data-testid='sidebar-nav-planning'",
+      "data-testid='sidebar-nav-labor-entry'",
+      "data-testid='sidebar-nav-equipment-entry'",
+      "data-testid='sidebar-nav-material-entry'",
+      "data-testid='sidebar-nav-approvals'",
+      "data-testid='sidebar-nav-rate-cards'",
+      "data-testid='sidebar-nav-setup'",
+      "data-testid='sidebar-nav-reports'",
+      "data-testid='sidebar-nav-erp-integration'",
+      "data-testid='sidebar-nav-users-admin'",
+      "data-testid='role-switcher-select'",
+      "data-testid='project-selector-dropdown'",
+      "data-testid='crew-plan-save-draft-btn'",
+      "data-testid='crew-plan-publish-btn'",
+      "data-testid='timesheet-present-checkbox-{id}'",
+      "data-testid='timesheet-actual-hours-input-{id}'",
+      "data-testid='equipment-meter-end-input-{id}'",
+      "data-testid='equipment-special-approval-toggle-{id}'",
+      "data-testid='material-qty-issued-input-{id}'",
+      "data-testid='approval-approve-btn-{id}'",
+      "data-testid='approval-reject-btn-{id}'",
+      "data-testid='erp-sync-master-data-btn'",
+      "data-testid='erp-push-batches-btn'"
+    ],
+    "apca_contrast": "Ensure all text on dark backgrounds has at least 4.5:1 ratio. Numeric data in tables must use high contrast text (#F9FAFB on #111827)."
+  },
+  "curated_image_urls": {
+    "heavy_equipment_site": "https://images.unsplash.com/photo-1575281923032-f40d94ef6160?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwxfHxjb25zdHJ1Y3Rpb24lMjBzaXRlJTIwaGVhdnklMjBlcXVpcG1lbnQlMjBwcm9qZWN0fGVufDB8fHx8MTc5MzIwNDAzMXww&ixlib=rb-4.1.0&q=85",
+    "crane_skyline": "https://images.unsplash.com/photo-1575230167650-dce335edc7f4?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwyfHxjb25zdHJ1Y3Rpb24lMjBzaXRlJTIwaGVhdnklMjBlcXVpcG1lbnQlMjBwcm9qZWN0fGVufDB8fHx8MTc5MzIwNDAzMXww&ixlib=rb-4.1.0&q=85",
+    "foreman_avatar_1": "https://images.unsplash.com/photo-1621905252472-943afaa20e20?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTN8MHwxfHNlYXJjaHwzfHxlbmdpbmVlciUyMGNvbnN0cnVjdGlvbiUyMHdvcmtlciUyMGhlbG1ldCUyMHBvcnRyYWl0fGVufDB8fHx8MTc5MzIwNDAzNHww&ixlib=rb-4.1.0&q=85",
+    "foreman_avatar_2": "https://images.unsplash.com/photo-1672748341520-6a839e6c05bb?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTN8MHwxfHNlYXJjaHxfHxlbmdpbmVlciUyMGNvbnN0cnVjdGlvbiUyMHdvcmtlciUyMGhlbG1ldCUyMHBvcnRyYWl0fGVufDB8fHx8MTc5MzIwNDAzNHww&ixlib=rb-4.1.0&q=85",
+    "foreman_avatar_3": "https://images.unsplash.com/photo-1570470836811-78ef04bb23d3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTN8MHwxfHNlYXJjaHwyfHxlbmdpbmVlciUyMGNvbnN0cnVjdGlvbiUyMHdvcmtlciUyMGhlbG1ldCUyMHBvcnRyYWl0fGVufDB8fHx8MTc5MzIwNDAzNHww&ixlib=rb-4.1.0&q=85"
+  },
+  "instructions_to_main_agent": [
+    "Use React (ES6 JavaScript .js files, NOT .tsx).",
+    "Use Tailwind CSS with custom slate/zinc dark mode utility classes and subtle borders (border-gray-800 or border-white/10).",
+    "Implement Sonner toast notifications (via sonner package) for actions like Save Draft, Publish Plan, Approve, Reject, and ERP Sync.",
+    "Use Lucide-React icons extensively throughout navigation and action buttons.",
+    "Ensure high density tables have hover highlights (hover:bg-slate-800/50), explicit column alignments (left for text, right for numeric values), and mono font for numeric figures.",
+    "Include sample data preloaded for realistic EPC projects (e.g. Metro Line Expansion, Refinery Unit 4 Upgrade, Offshore Platform Build).",
+    "Every interactive element MUST have a unique data-testid attribute."
+  ]
+}
