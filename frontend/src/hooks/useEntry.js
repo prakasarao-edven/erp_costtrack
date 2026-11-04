@@ -9,6 +9,7 @@ export function useEntry(type) {
   const [mode, setMode] = useState("manual");
   const [planId, setPlanId] = useState(null);
   const [lines, setLines] = useState([]);
+  const [bonuses, setBonuses] = useState([]);
   const [preview, setPreview] = useState(null);
   const [editing, setEditing] = useState(null);
   const [recent, setRecent] = useState([]);
@@ -16,8 +17,8 @@ export function useEntry(type) {
   const timer = useRef();
 
   const body = useCallback((action) => ({
-    type, ...header, crew_id: header.crew_id || null, plan_id: planId, mode, source: mode === "plan" ? "plan" : "manual", lines, action,
-  }), [type, header, planId, mode, lines]);
+    type, ...header, crew_id: header.crew_id || null, plan_id: planId, mode, source: mode === "plan" ? "plan" : "manual", lines, bonuses, action,
+  }), [type, header, planId, mode, lines, bonuses]);
 
   const loadRecent = useCallback(async () => {
     const { data } = await api.get("/transactions", { params: { type, mine: true } });
@@ -42,7 +43,7 @@ export function useEntry(type) {
   }, [api, body, ready]);
 
   const reset = () => {
-    setLines([]); setPreview(null); setEditing(null); setMode("manual"); setPlanId(null);
+    setLines([]); setBonuses([]); setPreview(null); setEditing(null); setMode("manual"); setPlanId(null);
   };
 
   const save = async (action) => {
@@ -54,8 +55,10 @@ export function useEntry(type) {
       toast.success(action === "submit" ? `${data.ref} submitted - ${data.status.replace("_", " ")}` : `${data.ref} saved as draft`);
       if (action === "submit") reset(); else setEditing(data);
       loadRecent();
+      return true;
     } catch (e) {
       toast.error(errMsg(e));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -66,11 +69,12 @@ export function useEntry(type) {
     setHeader({ project_number: tx.project_number, task_number: tx.task_number, crew_id: tx.crew_id || "", date: tx.date, notes: tx.notes || "" });
     setMode(tx.mode); setPlanId(tx.plan_id || null);
     setLines(tx.lines.map((l) => ({ ...l })));
+    setBonuses(tx.bonuses || []);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const setLine = (i, patch) => setLines((ls) => ls.map((l, j) => (j === i ? { ...l, ...patch } : l)));
   const removeLine = (i) => setLines((ls) => ls.filter((_, j) => j !== i));
 
-  return { api, header, setHeader, mode, setMode, planId, setPlanId, lines, setLines, setLine, removeLine, preview, editing, recent, busy, save, edit, reset };
+  return { api, header, setHeader, mode, setMode, planId, setPlanId, lines, setLines, setLine, removeLine, bonuses, setBonuses, preview, editing, recent, busy, save, edit, reset };
 }

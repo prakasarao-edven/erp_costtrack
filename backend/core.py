@@ -21,7 +21,7 @@ client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
 
 # Highest first; "pending" has no access until an admin assigns a role.
-ROLES = ["admin", "cost_controller", "project_manager", "store_manager", "foreman", "pending"]
+ROLES = ["admin", "master_data_admin", "cost_controller", "project_manager", "store_manager", "foreman", "pending"]
 DEFAULT_ROLE = "pending"
 RETIRED_ROLES = {}
 RANK = {r: len(ROLES) - i for i, r in enumerate(ROLES)}

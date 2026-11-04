@@ -1,0 +1,689 @@
+CostBridge — Standalone Master Data BRD Addendum
+Nov 4, 2026 · @AKM
+1. Purpose, scope and decisions
+CostBridge can run without an ERP once nine Wave 1 master data forms and a bulk upload exist. Today, every master record (projects, tasks, employees, equipment, items, rates and costs) is pulled from the ERP. This addendum adds local maintenance of the same records, so one product serves both integrated and standalone customers.
+In scope
+Wave 1 (go-live minimum): Project, Task/WBS, Employee, Equipment, Item, Store/Location, Labor Rate Card, Equipment Rate Card, Item Unit Cost.
+Wave 2: Task Budget, Lookups (Craft, Grade, Equipment Class, UOM, Bonus Types), Work Calendar.
+A bulk upload (CSV/Excel) for every entity, and a per-entity deployment mode setting.
+Out of scope
+Hour Types, approval rules, users/roles and tolerance settings. These already sit in the Setup module.
+Customer/vendor masters beyond a name field, procurement, inventory on-hand balances and payroll.
+Decisions taken (defaults, to be confirmed)
+#
+ | Decision
+ | Change from earlier BRD
+ | D1
+ | Material unit cost can be ERP-sourced or Local, like the labor and equipment rate cards
+ | Earlier rule was &quot;material cost always from ERP&quot;
+ | D2
+ | Deployment mode is set per entity, so Hybrid is supported (e.g. projects and employees from ERP, equipment local)
+ | New
+ | D3
+ | Task Budget is Wave 2. Until it exists, Budget Check is switched off in standalone mode; Plan Tolerance Check still works
+ | New
+ | D4
+ | Local records use the same natural keys as the ERP (Project#, Task#, Employee#, Asset ID, Item code)
+ | New
+ | 2. Deployment mode model
+Each master entity gets one Source Mode in Setup. The mode decides who creates the record, who can edit it, and whether ERP sync runs for it.
+Source Mode
+ | Who creates records
+ | Form behavior
+ | ERP sync
+ | ERP-synced
+ | ERP only
+ | View only; local edits blocked except local-only fields
+ | Scheduled + on-demand pull
+ | Local
+ | CostBridge users or bulk upload
+ | Full create / edit / deactivate
+ | Off
+ | Hybrid
+ | Both
+ | ERP records locked; local records editable
+ | Pull runs; it never overwrites a Local record
+ | Record-level fields (on every master table)
+Field
+ | Type
+ | Rule
+ | Source
+ | ERP / LOCAL
+ | Set at creation, never changed by users
+ | External ID
+ | Text(100)
+ | ERP primary key; blank for local records
+ | Last Synced On
+ | Timestamp
+ | ERP records only
+ | Status
+ | Active / Inactive
+ | See section 3
+ | Created By / On, Updated By / On
+ | Audit
+ | System-maintained
+ | Rules
+MD-01: Natural keys must be unique across Source. Creating a Local P-1001 when an ERP P-1001 exists is rejected.
+MD-02: In Hybrid mode, if an ERP pull brings a key that already exists as Local, the record goes to a Sync Conflict queue for an admin to merge or rename. It is not overwritten.
+MD-03: Switching an entity from Local to ERP-synced needs a key-match run first. Matched records get their External ID; unmatched Local records stay Local.
+MD-04: Local-only fields stay editable on ERP records (for example Default Store on an Item, or Foreman on an Employee). Each entity spec marks them LO.
+MD-05: Transactions always reference the internal record ID, not the natural key. Renames and re-keys never break history.
+3. Common design rules
+These rules apply to all master forms, so each entity spec below lists only its own fields.
+CR-01 Deactivate, never delete. A record used in any transaction can only be set Inactive. Inactive records disappear from entry dropdowns but stay visible in history and reports. Hard delete is allowed only for records never referenced.
+CR-02 Effective dating. Rates and costs carry Effective From and an optional Effective To. Periods for the same key must not overlap. Entries are costed at the rate valid on the transaction date, not the entry date.
+CR-03 Back-dated rate changes. If a rate changes for a period that already has approved entries, the system warns and lists the affected entries. A recost run is a separate, admin-only action.
+CR-04 Audit trail. Field-level change history (old value, new value, who, when) on Rate Cards, Item Cost and Task Budget. Other entities keep created/updated stamps only.
+CR-05 Status cascades. A Closed project blocks new entries on all its tasks. An Inactive employee or equipment cannot be added to a new plan or timesheet. Existing draft entries are flagged, not deleted.
+CR-06 List screens. Every entity has a list with search, filters (Status, Source, plus entity-specific filters), column sort, export to Excel, and a Bulk Upload button.
+CR-07 Form layout. Header fields at top, child records (tasks, rate lines) in a grid below. Save keeps you on the record; Save &amp; New clears the form. Required fields are marked; errors show next to the field.
+CR-08 Code format. Natural keys are uppercase, no spaces, up to 30 characters. Each tenant can configure an optional auto-numbering prefix per entity (e.g. EQ-00001).
+Access (in addition to existing roles)
+Role
+ | Projects / Tasks
+ | Employees / Equipment / Items / Stores
+ | Rate cards / Item cost
+ | Task budget
+ | Master Data Admin
+ | Create / Edit
+ | Create / Edit
+ | Create / Edit
+ | Create / Edit
+ | Project Controller
+ | Create / Edit
+ | View
+ | View
+ | Create / Edit
+ | Project Manager
+ | Edit own projects&apos; tasks
+ | View
+ | View
+ | View own
+ | Foreman / Supervisor
+ | View assigned
+ | View
+ | No access
+ | View assigned
+ | Rate visibility is restricted on purpose: foremen see hours and quantities, not cost rates.
+4. Wave 1 entity specs
+There are nine forms. Req = mandatory. LO = local-only field, editable even on ERP-synced records. Status, Source and audit fields from section 2 are not repeated here.
+master data feeding the three entry screens
+Project and Task are the only masters every entry screen shares. The other seven are each used by a single resource type.
+4.1 Project
+Field
+ | Type
+ | Req
+ | Rule
+ | Project Number
+ | Code(30)
+ | Y
+ | Unique; locked after first transaction
+ | Project Name
+ | Text(240)
+ | Y
+ | 
+ | Business Unit / Org
+ | Lookup
+ | Y
+ | Single BU per tenant in Wave 1 is acceptable
+ | Customer
+ | Text(240)
+ | N
+ | Free text in standalone
+ | Project Type
+ | Lookup
+ | N
+ | e.g. Lump Sum, T&amp;M, Cost Plus
+ | Project Currency
+ | Lookup
+ | Y
+ | Default from tenant
+ | Start Date / End Date
+ | Date
+ | Y / N
+ | End ≥ Start
+ | Project Manager
+ | Employee
+ | N
+ | 
+ | Project Status
+ | Draft / Active / On Hold / Closed
+ | Y
+ | Only Active accepts entries
+ | Site / Location
+ | Text(240)
+ | N
+ | Shown on entry screens
+ | 4.2 Task / WBS (child grid on Project)
+Field
+ | Type
+ | Req
+ | Rule
+ | Task Number
+ | Code(30)
+ | Y
+ | Unique within project
+ | Task Name
+ | Text(240)
+ | Y
+ | 
+ | Parent Task
+ | Task
+ | N
+ | Blank = top level; max 10 levels
+ | Chargeable
+ | Y/N
+ | Y
+ | Only chargeable tasks appear in entry screens
+ | Lowest Level
+ | Derived
+ | 
+ | True when the task has no children
+ | Start / End Date
+ | Date
+ | N
+ | Must sit inside the project dates
+ | Task Manager
+ | Employee
+ | N
+ | 
+ | Allowed Resource Types
+ | Labor / Equipment / Material
+ | N
+ | Blank = all; restricts what can be charged
+ | Task Status
+ | Active / Closed
+ | Y
+ | Closed blocks new entries
+ | Validation: a task with children cannot be chargeable. A parent cannot be closed while a child is open. Tasks can be added inline, indented/outdented, or imported in bulk.
+4.3 Employee
+Field
+ | Type
+ | Req
+ | Rule
+ | Employee Number
+ | Code(30)
+ | Y
+ | Unique
+ | First / Last Name
+ | Text(100)
+ | Y
+ | 
+ | Worker Type
+ | Employee / Contractor / Subcontractor
+ | Y
+ | 
+ | Subcontractor Firm
+ | Text(240)
+ | N
+ | Required when Worker Type = Subcontractor
+ | Craft / Job
+ | Lookup
+ | Y
+ | Drives labor rate
+ | Grade / Skill Level
+ | Lookup
+ | N
+ | Drives labor rate if used
+ | Home Org
+ | Lookup
+ | N
+ | 
+ | Supervisor / Foreman
+ | Employee
+ | N
+ | LO
+ | Hire Date / Termination Date
+ | Date
+ | Y / N
+ | Termination date makes the employee Inactive from that date
+ | Badge / Swipe ID
+ | Text(50)
+ | N
+ | LO; unique; used for swipe auto-fill
+ | Email / Mobile
+ | Text
+ | N
+ | Needed only if the employee logs in
+ | 4.4 Equipment
+Field
+ | Type
+ | Req
+ | Rule
+ | Asset ID
+ | Code(30)
+ | Y
+ | Unique
+ | Description
+ | Text(240)
+ | Y
+ | 
+ | Equipment Class
+ | Lookup
+ | Y
+ | e.g. Crane-50T, Excavator-20T; drives class rates
+ | Ownership
+ | Owned / Rented / Leased
+ | Y
+ | 
+ | Vendor
+ | Text(240)
+ | N
+ | Required when Rented or Leased
+ | Make / Model / Serial No
+ | Text
+ | N
+ | 
+ | Default Operator
+ | Employee
+ | N
+ | LO
+ | Meter Type
+ | Hours / Km / None
+ | N
+ | Enables a meter reading on usage entry
+ | Current Project
+ | Project
+ | N
+ | LO; informational
+ | Availability Status
+ | Available / In Use / Under Maintenance / Disposed
+ | Y
+ | Disposed = Inactive
+ | 4.5 Item (material)
+Field
+ | Type
+ | Req
+ | Rule
+ | Item Code
+ | Code(30)
+ | Y
+ | Unique
+ | Description
+ | Text(240)
+ | Y
+ | 
+ | Primary UOM
+ | Lookup
+ | Y
+ | Locked after first transaction
+ | Item Category
+ | Lookup
+ | N
+ | e.g. Cement, Steel, Consumables
+ | Item Type
+ | Bulk / Engineered / Consumable
+ | N
+ | 
+ | Default Store
+ | Store
+ | N
+ | LO
+ | Lot / Serial Controlled
+ | Y/N
+ | N
+ | If Y, entry screens ask for lot/serial
+ | 4.6 Store / Location
+Field
+ | Type
+ | Req
+ | Rule
+ | Store Code
+ | Code(30)
+ | Y
+ | Unique
+ | Store Name
+ | Text(240)
+ | Y
+ | 
+ | Store Type
+ | Central Warehouse / Site Store / Laydown Yard
+ | Y
+ | 
+ | Linked Project(s)
+ | Project, multi
+ | N
+ | Blank = available to all projects
+ | Address
+ | Text
+ | N
+ | 
+ | Store Keeper
+ | Employee
+ | N
+ | 
+ | 4.7 Labor Rate Card
+The header is the rate card. The lines hold the rates.
+Field
+ | Level
+ | Type
+ | Req
+ | Rule
+ | Rate Card Name
+ | Header
+ | Text(100)
+ | Y
+ | e.g. &quot;Site Labor 2026&quot;
+ | Applies To
+ | Header
+ | Tenant / Project
+ | Y
+ | A project-level card overrides the tenant card
+ | Currency
+ | Header
+ | Lookup
+ | Y
+ | 
+ | Craft
+ | Line
+ | Lookup
+ | Y
+ | 
+ | Grade
+ | Line
+ | Lookup
+ | N
+ | Blank = all grades of that craft
+ | Employee
+ | Line
+ | Employee
+ | N
+ | Optional named-person override
+ | Hour Type
+ | Line
+ | Lookup
+ | Y
+ | From Setup (Regular, OT, Mealtime, Weekend…)
+ | Rate Basis
+ | Line
+ | Amount / Multiplier of Regular
+ | Y
+ | 
+ | Rate
+ | Line
+ | Number(12,4)
+ | Y
+ | Amount per hour, or multiplier (e.g. 1.5)
+ | Effective From / To
+ | Line
+ | Date
+ | Y / N
+ | No overlap for the same Craft+Grade+Employee+Hour Type
+ | Rate lookup order: Employee line → Craft + Grade → Craft only. If nothing matches, the entry is flagged &quot;No rate&quot; and cannot be approved.
+Bonuses (Safety, Bad Weather) are a separate grid on the same card: Bonus Type, Basis (Fixed per day / Fixed per occurrence / Per hour), Amount, Effective From/To.
+4.8 Equipment Rate Card
+Field
+ | Level
+ | Type
+ | Req
+ | Rule
+ | Rate Card Name
+ | Header
+ | Text(100)
+ | Y
+ | 
+ | Applies To
+ | Header
+ | Tenant / Project
+ | Y
+ | Project card overrides tenant card
+ | Currency
+ | Header
+ | Lookup
+ | Y
+ | 
+ | Equipment Class
+ | Line
+ | Lookup
+ | Y*
+ | Class or Asset is required
+ | Asset ID
+ | Line
+ | Equipment
+ | Y*
+ | Asset line overrides class line
+ | Rate Type
+ | Line
+ | Lookup
+ | Y
+ | Active, Standby, Maintenance, Downtime, Transport…
+ | Rate UOM
+ | Line
+ | Hour / Day / Week / Month / Trip
+ | Y
+ | 
+ | Rate
+ | Line
+ | Number(12,4)
+ | Y
+ | Can be 0 (e.g. Downtime not billed)
+ | Minimum Charge
+ | Line
+ | Number
+ | N
+ | e.g. minimum 4 hours per day
+ | Effective From / To
+ | Line
+ | Date
+ | Y / N
+ | No overlap for the same Class/Asset + Rate Type
+ | 4.9 Item Unit Cost
+Field
+ | Type
+ | Req
+ | Rule
+ | Item
+ | Item
+ | Y
+ | 
+ | Cost Scope
+ | Tenant / Project / Store
+ | Y
+ | Most specific scope wins: Store → Project → Tenant
+ | Project / Store
+ | Lookup
+ | N
+ | Required when the scope needs it
+ | Unit Cost
+ | Number(14,4)
+ | Y
+ | Per primary UOM
+ | Currency
+ | Lookup
+ | Y
+ | 
+ | Effective From / To
+ | Date
+ | Y / N
+ | No overlap per Item + scope
+ | Item Cost follows its own Source Mode (D1), separate from the Item master. A customer can pull items from the ERP but keep costs local, or the reverse.
+5. Wave 2 entity specs
+Wave 2 adds the task budget, which switches on the Budget Check, plus lookups and a calendar. Until Wave 2 ships, Wave 1 can run on seeded lookups.
+5.1 Task Budget
+Field
+ | Type
+ | Req
+ | Rule
+ | Project / Task
+ | Task
+ | Y
+ | Lowest-level chargeable tasks only
+ | Budget Version
+ | Text(30)
+ | Y
+ | e.g. Original, Rev 1; one version is Current
+ | Resource Type
+ | Labor / Equipment / Material
+ | Y
+ | 
+ | Resource
+ | Craft, Equipment Class or Item
+ | N
+ | Blank = budget for the whole resource type
+ | Budget Qty
+ | Number
+ | N
+ | Hours for Labor/Equipment, UOM quantity for Material
+ | Budget Cost
+ | Number
+ | N
+ | Qty or Cost is required; both are allowed
+ | Version Status
+ | Draft / Approved / Superseded
+ | Y
+ | Only the Approved Current version feeds the Budget Check
+ | Budget Check compares cumulative actuals against the Current version at the most specific level that has a budget (Resource → Resource Type). The Warning / Stopper behavior is unchanged from the earlier BRD.
+5.2 Lookups
+There is one generic Lookup screen with Type, Code, Meaning, Description, Display Order and Status.
+Lookup Type
+ | Seeded values (editable)
+ | Used by
+ | Craft / Job
+ | Carpenter, Electrician, Welder, Rigger, Helper, Operator
+ | Employee, Labor Rate Card, Task Budget
+ | Grade / Skill Level
+ | Apprentice, Journeyman, Foreman
+ | Employee, Labor Rate Card
+ | Equipment Class
+ | (none seeded)
+ | Equipment, Equipment Rate Card, Task Budget
+ | UOM
+ | EA, HR, DAY, KG, MT, M, M2, M3, L, BAG
+ | Item, rate cards
+ | Item Category
+ | (none seeded)
+ | Item
+ | Bonus Type
+ | Safety, Bad Weather, Remote Site
+ | Labor Rate Card bonuses
+ | Project Type
+ | Lump Sum, T&amp;M, Cost Plus
+ | Project
+ | UOM also needs a conversion table (From UOM, To UOM, Factor), so that an issue recorded in BAG can cost against a KG price.
+5.3 Work Calendar
+Field
+ | Type
+ | Req
+ | Rule
+ | Calendar Name
+ | Text(100)
+ | Y
+ | Assigned to a project; tenant default otherwise
+ | Week Start Day
+ | Day
+ | Y
+ | Drives the weekly timesheet grid
+ | Working Days
+ | Mon–Sun flags
+ | Y
+ | Non-working days default to Weekend hour type
+ | Standard Hours per Day
+ | Number
+ | Y
+ | Beyond this, OT is suggested
+ | Holidays
+ | Date + Name grid
+ | N
+ | Holiday hours default to the Holiday hour type
+ | Timesheet Period
+ | Weekly / Bi-weekly / Semi-monthly
+ | Y
+ | Used for period lock
+ | 6. Bulk upload
+Bulk upload is the main go-live path, because standalone customers will load thousands of employees, items and tasks in one go. Every entity uses the same four-step flow.
+Download template. An Excel file with one sheet per entity (a Project file also carries a Tasks sheet). It includes column headers, a hidden lookup sheet that drives dropdowns, and one example row.
+Upload and validate. Every row is validated without saving: required fields, formats, lookups, duplicates within the file and against the database, date overlaps and parent-task references.
+Review. The screen shows counts (New / Update / Error), with rows filterable by result. Errors can be downloaded as the same file with an Error column added.
+Commit. Valid rows are saved in one transaction. The user picks All or nothing or Skip error rows.
+Rules
+BU-01 Match on the natural key: an existing key = Update, a new key = Create. A Mode column with Create / Update / Deactivate is optional.
+BU-02 ERP-sourced records in the file are rejected, except for their LO fields.
+BU-03 Load order is enforced: Lookups → Stores → Employees → Equipment → Items → Projects/Tasks → Rate Cards → Item Cost → Budgets. A file that references a missing parent fails with a clear message.
+BU-04 Limit is 20,000 rows per file; larger files are split. Validation runs in the background, and the user is notified when it finishes.
+BU-05 Every upload is logged with file name, user, time, counts, and the original and error files kept for 90 days.
+BU-06 Task hierarchy: Parent Task Number goes in a column. Rows can be in any order; the loader resolves parents.
+7. Screen inventory
+The module has 14 screens under a new Master Data menu. Eight of them are wireframed (W1–W8); the rest reuse the list and form patterns shown in those wireframes.
+#
+ | Screen
+ | Pattern
+ | Wave
+ | Wireframe
+ | 1
+ | Master Data home (entity tiles, counts, source mode)
+ | Dashboard
+ | 1
+ | W1
+ | 2
+ | Project + Tasks (WBS grid)
+ | Header + tree grid
+ | 1
+ | W2
+ | 3
+ | Employee list
+ | List
+ | 1
+ | W3
+ | 4
+ | Employee form
+ | Form
+ | 1
+ | uses W4 pattern
+ | 5
+ | Equipment form
+ | Form
+ | 1
+ | W4
+ | 6
+ | Item + Unit Cost
+ | Form + child grid
+ | 1
+ | W6
+ | 7
+ | Store form
+ | Form
+ | 1
+ | uses W4 pattern
+ | 8
+ | Labor Rate Card (rates + bonuses)
+ | Header + tabbed grids
+ | 1
+ | W5
+ | 9
+ | Equipment Rate Card
+ | Header + grid
+ | 1
+ | uses W5 pattern
+ | 10
+ | Bulk Upload (template → validate → review → commit)
+ | Wizard
+ | 1
+ | W7
+ | 11
+ | Source Mode settings (Setup)
+ | Settings grid
+ | 1
+ | W8
+ | 12
+ | Sync Conflict queue
+ | List + resolve panel
+ | 1 (Hybrid only)
+ | uses W3 pattern
+ | 13
+ | Task Budget
+ | Grid by task
+ | 2
+ | uses W5 pattern
+ | 14
+ | Lookups and Work Calendar
+ | Generic grid
+ | 2
+ | uses W3 pattern
+ | 8. Open questions
+☐ Confirm decisions D1–D4 in section 1, especially D1 (local material cost) and D3 (budget in Wave 2).
+☐ Multi-currency: do standalone customers need a currency conversion table, or is one currency per tenant enough for Wave 1?
+☐ Multi-BU: is one business unit per tenant acceptable for the first standalone customers?
+☐ Revenue / bill rates: is cost-only enough, or do standalone customers also need bill rates to invoice from CostBridge?
+☐ Employee login: will every employee need a login, or only foremen and admins?
+☐ Recost run (CR-03): manual admin action only, or automatic for entries not yet exported?
+☐ Is there an existing tech stack or UI component library the forms must match? This affects the build, not the BRD.

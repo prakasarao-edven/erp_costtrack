@@ -13,7 +13,8 @@ load_dotenv("/app/backend/.env")
 SK = os.environ["CLERK_SECRET_KEY"]
 USERS = {"admin": "cb.admin+clerk_test@example.com", "project_manager": "cb.pm+clerk_test@example.com",
          "cost_controller": "cb.cc+clerk_test@example.com", "foreman": "cb.foreman+clerk_test@example.com",
-         "store_manager": "cb.store+clerk_test@example.com", "pending": "cb.pending+clerk_test@example.com"}
+         "store_manager": "cb.store+clerk_test@example.com", "master_data_admin": "cb.mda+clerk_test@example.com",
+         "pending": "cb.pending+clerk_test@example.com"}
 PW = "CostBridge-Test-2026!"
 
 

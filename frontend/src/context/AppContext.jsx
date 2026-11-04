@@ -5,17 +5,18 @@ const Ctx = createContext(null);
 export const useApp = () => useContext(Ctx);
 
 export const NAV_ROLES = {
-  dashboard: ["admin", "cost_controller", "project_manager", "store_manager", "foreman"],
+  dashboard: ["admin", "master_data_admin", "cost_controller", "project_manager", "store_manager", "foreman"],
   planning: ["admin", "project_manager", "foreman", "store_manager"],
   labor: ["admin", "project_manager", "foreman"],
   equipment: ["admin", "project_manager", "foreman"],
   material: ["admin", "store_manager", "foreman"],
   approvals: ["admin", "project_manager", "cost_controller"],
-  rates: ["admin", "cost_controller", "project_manager"],
+  rates: ["admin", "master_data_admin", "cost_controller", "project_manager"],
   setup: ["admin"],
   reports: ["admin", "cost_controller", "project_manager", "store_manager", "foreman"],
   erp: ["admin", "cost_controller"],
   users: ["admin"],
+  master: ["admin", "master_data_admin", "cost_controller", "project_manager", "store_manager", "foreman"],
 };
 
 export function AppProvider({ children }) {

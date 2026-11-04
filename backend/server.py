@@ -14,12 +14,14 @@ try:
     from backend.core import ACTIVE, ENV, IN_ENV, RANK, ROLES, audit, client, current_member, db, effective_role, new_id, now_iso, require_role
     from backend.engine import PENDING, build_cost_transactions, get_settings, next_status, plan_rows, route_on_submit, step_roles, validate
     from backend.erp import get_adapter
+    from backend.masterdata import md, source_modes
     from backend.seed import next_ref, seed
 except ModuleNotFoundError:
     from clerk_auth import clerk_router
     from core import ACTIVE, ENV, IN_ENV, RANK, ROLES, audit, client, current_member, db, effective_role, new_id, now_iso, require_role
     from engine import PENDING, build_cost_transactions, get_settings, next_status, plan_rows, route_on_submit, step_roles, validate
     from erp import get_adapter
+    from masterdata import md, source_modes
     from seed import next_ref, seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -89,8 +91,15 @@ async def set_role(user_id: str, body: RoleIn, admin: dict = Depends(require_rol
 @api.get("/master")
 async def master(member: dict = Depends(all_active())):
     out = {}
-    for name in ["projects", "tasks", "employees", "equipment", "items", "crews", "reason_codes", "budgets"]:
+    live = {"status": {"$nin": ["Inactive", "Closed", "Disposed"]}}
+    for name in ["projects", "tasks", "employees", "equipment", "items", "stores"]:
+        out[name] = await db[name].find(live, P).to_list(20000)
+    out["tasks"] = [t for t in out["tasks"] if t.get("chargeable", True) not in (False, "N", "false")]
+    for name in ["crews", "reason_codes", "budgets", "lookups", "bonus_rates"]:
         out[name] = await db[name].find({}, P).to_list(10000)
+    if member["role"] == "foreman":
+        out["items"] = [{k: v for k, v in i.items() if k != "unit_cost"} for i in out["items"]]
+        out["bonus_rates"] = [{k: v for k, v in b.items() if k != "amount"} for b in out["bonus_rates"]]
     out["hour_types"] = await db.hour_types.find({}, P).sort("order", 1).to_list(100)
     out["settings"] = await get_settings()
     return out
@@ -266,6 +275,12 @@ class TxLine(BaseModel):
     warehouse: Optional[str] = None
 
 
+class Bonus(BaseModel):
+    resource_number: str
+    bonus_type: str = Field(min_length=1)
+    amount: float = Field(ge=0)
+
+
 class TxIn(BaseModel):
     type: Literal["labor", "equipment", "material"]
     project_number: str
@@ -277,6 +292,7 @@ class TxIn(BaseModel):
     source: Literal["manual", "plan", "swipe", "iot"] = "manual"
     notes: str = ""
     lines: list[TxLine]
+    bonuses: list[Bonus] = []
     action: Literal["draft", "submit"] = "draft"
 
 
@@ -286,8 +302,11 @@ def _check_capture(t: str, member: dict):
 
 
 async def _check_master(body: TxIn):
-    if not await db.tasks.find_one({"project_number": body.project_number, "number": body.task_number}):
-        raise HTTPException(400, "Unknown Project# / Task#")
+    if not await db.tasks.find_one({"project_number": body.project_number, "number": body.task_number, "status": {"$nin": ["Closed", "Inactive"]}}):
+        raise HTTPException(400, "Unknown or closed Project# / Task#")
+    proj = await db.projects.find_one({"number": body.project_number}, {"_id": 0, "status": 1})
+    if proj and proj.get("status") in ("Closed", "On Hold", "Inactive"):
+        raise HTTPException(400, f"Project is {proj['status']} - no new entries")
     for ln in body.lines:
         if body.type == "material" and not ln.item_number:
             raise HTTPException(400, "Item is required on every line")
@@ -295,9 +314,9 @@ async def _check_master(body: TxIn):
             raise HTTPException(400, "Resource and Hour Type are required on every line")
     coll, key = {"labor": (db.employees, "resource_number"), "equipment": (db.equipment, "resource_number"), "material": (db.items, "item_number")}[body.type]
     nums = {getattr(ln, key) for ln in body.lines}
-    known = {d["number"] for d in await coll.find({"number": {"$in": list(nums)}}, {"_id": 0, "number": 1}).to_list(10000)}
+    known = {d["number"] for d in await coll.find({"number": {"$in": list(nums)}, "status": {"$nin": ["Inactive", "Disposed"]}}, {"_id": 0, "number": 1}).to_list(10000)}
     if nums - known:
-        raise HTTPException(400, f"Unknown: {', '.join(sorted(nums - known))}")
+        raise HTTPException(400, f"Unknown or inactive: {', '.join(sorted(nums - known))}")
     if body.type != "material":
         codes = {h["code"] for h in await db.hour_types.find({"resource_type": body.type}, P).to_list(50)}
         bad = {ln.hour_type for ln in body.lines} - codes
@@ -307,7 +326,7 @@ async def _check_master(body: TxIn):
 
 def _tx_from(body: TxIn) -> dict:
     lines = [ln.model_dump(exclude_none=True) for ln in body.lines]
-    return {**body.model_dump(exclude={"lines", "action"}), "lines": lines}
+    return {**body.model_dump(exclude={"lines", "action"}), "lines": lines, "bonuses": [b.model_dump() for b in body.bonuses] if body.type == "labor" else []}
 
 
 async def _finalize(tx: dict, action: str, member: dict) -> dict:
@@ -547,12 +566,13 @@ class RateIn(BaseModel):
     multiplier: float = Field(default=1.0, ge=0)
     premium: float = Field(default=0, ge=0)
     effective_from: str = "2026-01-01"
+    effective_to: Optional[str] = None
 
 
 @api.post("/rate-cards")
-async def add_rate(body: RateIn, member: dict = Depends(require_role("admin"))):
-    if await db.rate_cards.find_one({"resource_type": body.resource_type, "key": body.key, "hour_type": body.hour_type}):
-        raise HTTPException(409, "Rate already exists for this key and hour type")
+async def add_rate(body: RateIn, member: dict = Depends(require_role("admin", "master_data_admin"))):
+    if await db.rate_cards.find_one({"resource_type": body.resource_type, "key": body.key, "hour_type": body.hour_type, "effective_from": body.effective_from}):
+        raise HTTPException(409, "Rate already exists for this key, hour type and effective date")
     doc = {"id": new_id(), **body.model_dump()}
     await db.rate_cards.insert_one(doc)
     await audit("rate_card", doc["id"], "created", member, body.model_dump())
@@ -561,12 +581,37 @@ async def add_rate(body: RateIn, member: dict = Depends(require_role("admin"))):
 
 
 @api.put("/rate-cards/{rid}")
-async def update_rate(rid: str, body: RateIn, member: dict = Depends(require_role("admin"))):
+async def update_rate(rid: str, body: RateIn, member: dict = Depends(require_role("admin", "master_data_admin"))):
     res = await db.rate_cards.update_one({"id": rid}, {"$set": body.model_dump()})
     if not res.matched_count:
         raise HTTPException(404, "Not found")
     await audit("rate_card", rid, "updated", member, body.model_dump())
     return await db.rate_cards.find_one({"id": rid}, P)
+
+
+class BonusRateIn(BaseModel):
+    bonus_type: str = Field(min_length=1)
+    basis: Literal["per_day", "per_occurrence", "per_hour"]
+    amount: float = Field(ge=0)
+    effective_from: str = "2026-01-01"
+    effective_to: Optional[str] = None
+
+
+@api.post("/bonus-rates")
+async def add_bonus_rate(body: BonusRateIn, member: dict = Depends(require_role("admin", "master_data_admin"))):
+    doc = {"id": new_id(), **body.model_dump()}
+    await db.bonus_rates.insert_one(dict(doc))
+    await audit("bonus_rate", doc["id"], "created", member, body.model_dump())
+    return doc
+
+
+@api.put("/bonus-rates/{rid}")
+async def update_bonus_rate(rid: str, body: BonusRateIn, member: dict = Depends(require_role("admin", "master_data_admin"))):
+    res = await db.bonus_rates.update_one({"id": rid}, {"$set": body.model_dump()})
+    if not res.matched_count:
+        raise HTTPException(404, "Not found")
+    await audit("bonus_rate", rid, "updated", member, body.model_dump())
+    return await db.bonus_rates.find_one({"id": rid}, P)
 
 
 class HourTypeIn(BaseModel):
@@ -652,16 +697,25 @@ async def erp_sync(body: SyncIn, member: dict = Depends(require_role("admin"))):
 
 
 async def _run_sync(a, batches: list[dict]):
+    modes = await source_modes()
     for b in batches:
         upd = {}
         try:
+            if modes.get(b["entity"]) == "local":
+                raise RuntimeError(f"{b['entity']} source mode is Local - ERP sync is off")
             rows = await a.pull(b["entity"])
             coll, keys = KEYS[b["entity"]]
-            ops = [UpdateOne({k: r[k] for k in keys}, {"$set": {**r, "source": "oracle", "synced_at": now_iso()}, "$setOnInsert": {"id": new_id()}}, upsert=True)
+            local = {tuple(d.get(k) for k in keys) for d in await db[coll].find({"source": {"$ne": "oracle"}}, {"_id": 0, **{k: 1 for k in keys}}).to_list(100000)}
+            clash = [r for r in rows if tuple(r.get(k) for k in keys) in local]
+            if clash:
+                await db.erp_conflicts.insert_many([{"id": new_id(), "entity": coll, "key": " / ".join(str(r.get(k)) for k in keys), "erp": r, "at": now_iso()} for r in clash])
+            rows = [r for r in rows if tuple(r.get(k) for k in keys) not in local]
+            ops = [UpdateOne({k: r[k] for k in keys}, {"$set": {**r, "source": "oracle", "external_id": str(r.get("erp_id") or r[keys[-1]]), "synced_at": now_iso()},
+                                                      "$setOnInsert": {"id": new_id(), "status": "Active"}}, upsert=True)
                    for r in rows]
             for i in range(0, len(ops), 1000):
                 await db[coll].bulk_write(ops[i:i + 1000], ordered=False)
-            upd = {"status": "success", "count": len(rows)}
+            upd = {"status": "success", "count": len(rows), **({"error": f"{len(clash)} key conflicts with local records - see Master Data"} if clash else {})}
         except Exception as e:
             logger.exception("ERP sync %s failed", b["entity"])
             upd = {"status": "error", "error": str(e)[:500]}
@@ -706,6 +760,7 @@ async def erp_costs(status: Optional[str] = None, member: dict = Depends(require
 
 
 app.include_router(api)
+app.include_router(md)
 app.include_router(clerk_router)
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
                    allow_methods=["*"], allow_headers=["*"])
