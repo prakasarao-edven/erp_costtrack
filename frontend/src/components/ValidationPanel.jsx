@@ -43,7 +43,7 @@ export default function ValidationPanel({ tx }) {
           <span className="cb-eyebrow">Totals & routing</span>
           {v.special.required && <span className="flex items-center gap-1 text-xs text-rose-300"><Flag className="h-3 w-3" />Special approval</span>}
         </div>
-        <div className="num text-2xl font-semibold text-foreground" data-testid="entry-total-cost">{usd(tx.totals.cost)}</div>
+        {tx.totals.cost !== undefined && <div className="num text-2xl font-semibold text-foreground" data-testid="entry-total-cost">{usd(tx.totals.cost)}</div>}
         <div className="num text-xs text-muted-foreground">{num(tx.totals.qty, 2)} {tx.totals.uom}</div>
         {v.special.reasons.map((r) => <div key={r} className="mt-2 text-xs text-rose-300">{r}</div>)}
         {v.errors.map((e) => (

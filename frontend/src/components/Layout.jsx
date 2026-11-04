@@ -3,13 +3,14 @@ import { NavLink, useLocation } from "react-router-dom";
 import { UserButton } from "@clerk/react";
 import {
   LayoutDashboard, CalendarDays, UserCheck, Truck, Boxes, CheckSquare, CreditCard, SlidersHorizontal,
-  FileSpreadsheet, Database, ShieldCheck, Menu, X,
+  FileSpreadsheet, Database, ShieldCheck, Menu, X, Layers,
 } from "lucide-react";
 import { useApp } from "@/context/AppContext";
 import { ROLE_LABEL, useApi } from "@/lib/api";
 
 const NAV = [
   ["dashboard", "/", "Dashboard", LayoutDashboard],
+  ["master", "/master", "Master Data", Layers],
   ["planning", "/planning", "Planning", CalendarDays],
   ["labor", "/labor", "Labor Entry", UserCheck],
   ["equipment", "/equipment", "Equipment Entry", Truck],

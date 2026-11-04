@@ -50,6 +50,43 @@ BUDGETS = [("PRJ-1042", "Civil-WBS-3", "labor", None, 600, "hrs"), ("PRJ-1042", 
            ("PRJ-2088", "Piping-WBS-4", "labor", None, 800, "hrs"), ("PRJ-2088", "Piping-WBS-4", "material", "PIPE-CS-6IN", 3000, "M")]
 
 
+LOOKUPS = [("CRAFT", c) for c in ["Carpenter", "Electrician", "Welder", "Rigger", "Helper", "Operator", "Mason", "Steel Fixer", "Pipefitter"]] + \
+    [("GRADE", g) for g in GRADES] + [("EQUIPMENT_CLASS", c) for c in EQ_RATES] + \
+    [("UOM", u) for u in ["EA", "HR", "DAY", "KG", "MT", "M", "M2", "M3", "L", "BAG", "TON"]] + \
+    [("ITEM_CATEGORY", c) for c in ["Civil", "Steel", "Piping", "Electrical", "Consumables"]] + \
+    [("BONUS_TYPE", b) for b in ["Safety", "Bad Weather", "Remote Site"]] + [("PROJECT_TYPE", p) for p in ["Lump Sum", "T&M", "Cost Plus"]]
+NEW_LABOR_HT = [("WKD", "Weekend", "Labor - Weekend", 1.5), ("HOL", "Holiday", "Labor - Holiday", 2.0)]
+BONUS_RATES = [("Safety", "per_day", 10.0), ("Bad Weather", "per_hour", 2.5), ("Remote Site", "per_day", 25.0)]
+
+
+async def migrate():
+    """Idempotent additions for the master data module."""
+    today = date.today()
+    first, last = today.replace(day=1), today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    await db.plans.update_many({"created_by": "Sample data", "end_date": {"$lt": today.isoformat()}},
+                               {"$set": {"start_date": first.isoformat(), "end_date": last.isoformat()}})
+    if not await db.lookups.count_documents({}):
+        await db.lookups.insert_many([{"id": new_id(), "type": t, "code": c.upper().replace(" ", "_").replace("&", "N"), "meaning": c,
+                                       "order": i, "status": "Active", "source": "local"} for i, (t, c) in enumerate(LOOKUPS)])
+    if not await db.stores.count_documents({}):
+        await db.stores.insert_many([{"id": new_id(), "code": "STR-SITE-1042", "name": "Metro Phase 2 Site Store", "store_type": "Site Store",
+                                      "linked_projects": "PRJ-1042", "status": "Active", "source": "local"},
+                                     {"id": new_id(), "code": "STR-CWH-01", "name": "Central Warehouse", "store_type": "Central Warehouse",
+                                      "status": "Active", "source": "local"}])
+    if not await db.bonus_rates.count_documents({}):
+        await db.bonus_rates.insert_many([{"id": new_id(), "bonus_type": b, "basis": basis, "amount": a, "effective_from": "2026-01-01"}
+                                          for b, basis, a in BONUS_RATES])
+    for i, (code, name, et, mult) in enumerate(NEW_LABOR_HT):
+        if await db.hour_types.find_one({"resource_type": "labor", "code": code}):
+            continue
+        await db.hour_types.insert_one({"id": new_id(), "resource_type": "labor", "code": code, "name": name, "requires_reason": False,
+                                        "expenditure_type": et, "order": 3.5 + i * 0.1})
+        keys = {r["key"]: r["base_rate"] for r in await db.rate_cards.find({"resource_type": "labor", "hour_type": "REG"}, {"_id": 0}).to_list(1000)}
+        if keys:
+            await db.rate_cards.insert_many([{"id": new_id(), "resource_type": "labor", "key": k, "hour_type": code, "base_rate": b, "multiplier": mult,
+                                              "premium": 0, "effective_from": "2026-01-01"} for k, b in keys.items()])
+
+
 async def next_ref(prefix: str) -> str:
     c = await db.counters.find_one_and_update({"id": prefix}, {"$inc": {"n": 1}}, upsert=True, return_document=True)
     return f"{prefix}-{c['n']:05d}"
@@ -68,6 +105,7 @@ async def seed():
     if await db.settings.count_documents({}) == 0:
         await db.settings.insert_one(dict(DEFAULT_SETTINGS))
     if await db.projects.count_documents({}) > 0:
+        await migrate()
         return
     await db.projects.insert_many([{"id": new_id(), "number": n, "name": nm, "client": c, "source": SRC} for n, nm, c in PROJECTS])
     await db.tasks.insert_many([{"id": new_id(), "project_number": p, "number": n, "name": nm, "source": SRC} for p, n, nm in TASKS])
@@ -133,3 +171,4 @@ async def seed():
                      "pending_step1", "R. Naidu (Foreman)")
     await _sample_tx("material", "PRJ-1042", "Civil-WBS-3", y, [{"item_number": "CEM-OPC53", "qty_issued": 120, "qty_wasted": 6, "qty_returned": 4,
                                                                "reason_code": "WASTE-DMG"}], "pending_step1", "S. Iyer (Store Mgr)")
+    await migrate()

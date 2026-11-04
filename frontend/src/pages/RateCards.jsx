@@ -30,7 +30,7 @@ const AddRate = ({ type, hourTypes, onAdd }) => {
   const [v, setV] = useState({ key: "", hour_type: hourTypes[0]?.code || "", base_rate: 0, multiplier: 1, premium: 0 });
   return (
     <div className="mt-4 flex flex-wrap items-end gap-3">
-      <Field label={type === "labor" ? "Grade" : "Equipment class"}><input className="cb-input w-44" data-testid={`add-rate-${type}-key`} value={v.key} onChange={(e) => setV({ ...v, key: e.target.value })} /></Field>
+      <Field label={type === "labor" ? "Grade, or RES:<Employee#> override" : "Class, or RES:<Asset ID> override"}><input className="cb-input w-44" data-testid={`add-rate-${type}-key`} value={v.key} onChange={(e) => setV({ ...v, key: e.target.value })} /></Field>
       <Field label="Hour type"><Sel className="w-40" value={v.hour_type} onChange={(e) => setV({ ...v, hour_type: e.target.value })} options={hourTypes.map((h) => ({ value: h.code, label: h.name }))} /></Field>
       <Field label="Base $/hr"><input type="number" className="cb-input w-28" data-testid={`add-rate-${type}-base`} value={v.base_rate} onChange={(e) => setV({ ...v, base_rate: Number(e.target.value) })} /></Field>
       <Field label="Multiplier"><input type="number" step="0.05" className="cb-input w-24" value={v.multiplier} onChange={(e) => setV({ ...v, multiplier: Number(e.target.value) })} /></Field>
@@ -67,10 +67,43 @@ const HourTypes = ({ admin }) => {
   );
 };
 
+const BonusRates = ({ admin }) => {
+  const api = useApi();
+  const { master, reloadMaster } = useApp();
+  const [v, setV] = useState({ bonus_type: "", basis: "per_day", amount: 0, effective_from: "2026-01-01" });
+  const types = master.lookups.filter((l) => l.type === "BONUS_TYPE").map((l) => l.meaning);
+  const save = async (b, patch) => {
+    try { const { id, ...rest } = { ...b, ...patch }; await (id ? api.put(`/bonus-rates/${id}`, rest) : api.post("/bonus-rates", rest)); await reloadMaster(); toast.success("Bonus rate saved"); }
+    catch (e) { toast.error(errMsg(e)); }
+  };
+  const BASIS = [{ value: "per_day", label: "Fixed per day" }, { value: "per_occurrence", label: "Fixed per occurrence" }, { value: "per_hour", label: "Per hour" }];
+  return (
+    <div className="cb-card overflow-x-auto p-4">
+      <table className="w-full" data-testid="bonus-rates-table">
+        <thead><tr><th className="cb-th">Bonus type</th><th className="cb-th">Basis</th><th className="cb-th">Amount $</th><th className="cb-th">Effective from</th></tr></thead>
+        <tbody>{master.bonus_rates.map((b) => (
+          <tr key={b.id} className="cb-row"><td className="cb-td">{b.bonus_type}</td>
+            <td className="cb-td"><Sel disabled={!admin} value={b.basis} options={BASIS} onChange={(e) => save(b, { basis: e.target.value })} /></td>
+            <td className="cb-td"><input type="number" className="cb-input num w-28 text-right" disabled={!admin} defaultValue={b.amount} data-testid={`bonus-amount-${b.bonus_type}`}
+              onBlur={(e) => Number(e.target.value) !== b.amount && save(b, { amount: Number(e.target.value) })} /></td>
+            <td className="cb-td num text-xs">{b.effective_from}</td></tr>
+        ))}</tbody>
+      </table>
+      {admin && <div className="mt-4 flex flex-wrap items-end gap-3">
+        <Field label="Bonus type"><Sel className="w-40" value={v.bonus_type} placeholder="Select" onChange={(e) => setV({ ...v, bonus_type: e.target.value })} options={types.map((t) => ({ value: t, label: t }))} /></Field>
+        <Field label="Basis"><Sel className="w-44" value={v.basis} onChange={(e) => setV({ ...v, basis: e.target.value })} options={BASIS} /></Field>
+        <Field label="Amount $"><input type="number" className="cb-input w-28" value={v.amount} onChange={(e) => setV({ ...v, amount: Number(e.target.value) })} /></Field>
+        <Button disabled={!v.bonus_type} onClick={() => save(v, {})} data-testid="add-bonus-rate-btn"><Plus className="mr-1 h-4 w-4" />Add</Button>
+      </div>}
+      <p className="mt-3 text-xs text-muted-foreground">Selecting a bonus type on the timesheet pre-fills the amount (per hour = rate x hours worked); the amount stays editable. Bonus types are maintained in Master Data &gt; Lookups.</p>
+    </div>
+  );
+};
+
 export default function RateCards() {
   const api = useApi();
   const { me, master, reloadMaster } = useApp();
-  const admin = me.role === "admin";
+  const admin = ["admin", "master_data_admin"].includes(me.role);
   const [rates, setRates] = useState([]);
   const load = useCallback(async () => setRates((await api.get("/rate-cards")).data), [api]);
   useEffect(() => { load(); }, [load]);
@@ -120,11 +153,13 @@ export default function RateCards() {
           <TabsTrigger value="labor" data-testid="rates-tab-labor">Labor</TabsTrigger>
           <TabsTrigger value="equipment" data-testid="rates-tab-equipment">Equipment</TabsTrigger>
           <TabsTrigger value="hours" data-testid="rates-tab-hours">Hour types</TabsTrigger>
+          <TabsTrigger value="bonus" data-testid="rates-tab-bonus">Bonuses</TabsTrigger>
           <TabsTrigger value="materials" data-testid="rates-tab-materials">Material cost (ERP)</TabsTrigger>
         </TabsList>
         <TabsContent value="labor">{table("labor")}</TabsContent>
         <TabsContent value="equipment">{table("equipment")}</TabsContent>
         <TabsContent value="hours"><HourTypes admin={admin} /></TabsContent>
+        <TabsContent value="bonus"><BonusRates admin={admin} /></TabsContent>
         <TabsContent value="materials">
           <div className="cb-card overflow-x-auto">
             <table className="w-full" data-testid="item-cost-table">

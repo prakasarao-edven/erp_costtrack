@@ -16,6 +16,8 @@ import Reports from "@/pages/Reports";
 import ErpSync from "@/pages/ErpSync";
 import Users from "@/pages/Users";
 import Pending from "@/pages/Pending";
+import MasterData from "@/pages/MasterData";
+import MasterList from "@/pages/MasterList";
 
 const AuthShell = ({ children }) => (
   <div className="cb-grid-bg flex min-h-screen">
@@ -58,6 +60,8 @@ const Protected = () => {
         <Route path="/reports" element={<Gate k="reports"><Reports /></Gate>} />
         <Route path="/erp" element={<Gate k="erp"><ErpSync /></Gate>} />
         <Route path="/users" element={<Gate k="users"><Users /></Gate>} />
+        <Route path="/master" element={<Gate k="master"><MasterData /></Gate>} />
+        <Route path="/master/:entity" element={<Gate k="master"><MasterList /></Gate>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Layout>
