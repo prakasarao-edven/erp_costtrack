@@ -1,10 +1,12 @@
 """PostgreSQL migration checks; integration cases use the isolated local test schema."""
 import asyncio
+import os
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, text, func
 from sqlalchemy.sql.dml import Insert
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
@@ -177,17 +179,17 @@ def test_erp_sync_upsert_preserves_master_ids(c, monkeypatch):
     class Adapter:
         async def pull(self, entity):
             assert entity == "projects"
-            return [{"number": "PRJ-1042", "name": "Synced project", "client": "Test", "erp_id": 1234, "status": "Active"}]
+            return [{"number": "00009805", "name": "Synced project", "client": "Test", "erp_id": 1234, "status": "Active"}]
 
     monkeypatch.setattr(server, "get_adapter", lambda: Adapter())
-    original = next(p for p in c["admin"].get("/master").json()["projects"] if p["number"] == "PRJ-1042")
+    original = next(p for p in c["admin"].get("/master").json()["projects"] if p["number"] == "00009805")
     for _ in range(2):
         response = c["admin"].post("/erp/sync", {"entities": ["projects"]})
         assert response.status_code == 200, response.text
         batch_id = response.json()[0]["id"]
         batch = next(b for b in c["admin"].get("/erp/batches").json() if b["id"] == batch_id)
         assert batch["status"] == "success", batch
-    updated = next(p for p in c["admin"].get("/master").json()["projects"] if p["number"] == "PRJ-1042")
+    updated = next(p for p in c["admin"].get("/master").json()["projects"] if p["number"] == "00009805")
     assert updated["id"] == original["id"]
     assert updated["name"] == "Synced project"
 
@@ -216,3 +218,65 @@ def test_auto_approval_inserts_parent_before_cost_lines(c, crew_b):
         assert len(saved["cost_transactions"]) == 1
     finally:
         assert c["admin"].put("/settings", settings).status_code == 200
+
+
+def test_existing_schema_upgrade_preserves_data_and_rate_history(local_client):
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
+    from sqlalchemy.schema import CreateSchema, DropSchema
+
+    async def check():
+        schema = "costbridge_upgrade_" + uuid4().hex
+        database = Database(os.environ["TEST_DATABASE_URL"])
+        original_engine = database.engine
+        database.engine = create_async_engine(original_engine.url, poolclass=NullPool,
+            execution_options={"schema_translate_map": {None: schema}})
+        try:
+            async with database.engine.begin() as connection:
+                await connection.execute(CreateSchema(schema))
+                await connection.execute(text(f'CREATE TABLE "{schema}".projects '
+                    '(id TEXT PRIMARY KEY, number TEXT UNIQUE NOT NULL, name TEXT NOT NULL)'))
+                await connection.execute(text(f'CREATE TABLE "{schema}".hour_types '
+                    '(id TEXT PRIMARY KEY, resource_type TEXT NOT NULL, code TEXT NOT NULL, "order" INTEGER, '
+                    'UNIQUE (resource_type, code))'))
+                await connection.execute(text(f'CREATE TABLE "{schema}".rate_cards '
+                    '(id TEXT PRIMARY KEY, resource_type TEXT NOT NULL, key TEXT NOT NULL, hour_type TEXT NOT NULL, '
+                    'base_rate NUMERIC(20,6) NOT NULL, multiplier NUMERIC(20,6) NOT NULL, premium NUMERIC(20,6) NOT NULL, '
+                    'effective_from TEXT, UNIQUE (resource_type, key, hour_type))'))
+                await connection.execute(insert(t.projects).values(id="preserved-project", number="OLD-1", name="Existing project"))
+                await connection.execute(insert(t.hour_types).values(id="old-regular", resource_type="labor", code="REG", order=1))
+                await connection.execute(insert(t.rate_cards).values(id="old-rate", resource_type="labor", key="Skilled",
+                    hour_type="REG", base_rate=36, multiplier=1, premium=0, effective_from="2026-01-01"))
+            await database.initialize()
+            await database.initialize()
+            saved = await database.one(select(t.projects).where(t.projects.c.id == "preserved-project"))
+            assert saved["number"] == "OLD-1" and saved["name"] == "Existing project"
+            await database.execute(insert(t.rate_cards).values(id="new-rate", resource_type="labor", key="Skilled",
+                hour_type="REG", base_rate=40, multiplier=1, premium=0, effective_from="2027-01-01"))
+            await database.execute(insert(t.hour_types).values(id="weekend", resource_type="labor", code="WKD", order=3.5))
+            assert await database.scalar(select(func.count()).select_from(t.rate_cards)) == 2
+            assert (await database.one(select(t.hour_types).where(t.hour_types.c.id == "weekend")))["order"] == 3.5
+            assert await database.scalar(select(func.count()).select_from(t.schema_migrations)) == 1
+        finally:
+            async with database.engine.begin() as connection:
+                await connection.execute(DropSchema(schema, cascade=True))
+            await database.close()
+            await original_engine.dispose()
+
+    local_client.portal.call(check)
+
+
+def test_erp_sync_records_conflict_without_overwriting_local_project(c, monkeypatch):
+    from backend import server
+
+    class Adapter:
+        async def pull(self, entity):
+            return [{"number": "PRJ-1042", "name": "ERP replacement", "client": "Test", "erp_id": 9876}]
+
+    monkeypatch.setattr(server, "get_adapter", lambda: Adapter())
+    original = next(p for p in c["admin"].get("/master").json()["projects"] if p["number"] == "PRJ-1042")
+    assert c["admin"].post("/erp/sync", {"entities": ["projects"]}).status_code == 200
+    saved = next(p for p in c["admin"].get("/master").json()["projects"] if p["number"] == "PRJ-1042")
+    assert saved["id"] == original["id"] and saved["name"] == original["name"]
+    conflicts = c["admin"].get("/md/conflicts").json()
+    assert any(item["entity"] == "projects" and item["key"] == "PRJ-1042" for item in conflicts)

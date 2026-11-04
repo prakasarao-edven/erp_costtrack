@@ -65,7 +65,7 @@ class TestPlanning:
         d = r.json()
         assert d["status"] == "pending_step2"
         # Skilled: REG 36*8=288, OT 54*2=108
-        assert d["totals"]["cost"] == 396.0
+        assert c["admin"].get(f"/transactions/{d['id']}").json()["totals"]["cost"] == 396.0
 
     def test_material_plan(self, c):
         body = {"kind": "material", "project_number": "PRJ-2088", "task_number": "Piping-WBS-4", "period_type": "monthly",
@@ -92,7 +92,7 @@ class TestLabor:
         af = loaded["lines"]
         af[0]["hours"] = 10  # 8 -> 10 = +25%
         af[1]["present"] = False
-        d = c["foreman"].post("/transactions/preview", tx("labor", "PRJ-1042", "Civil-WBS-3", af, mode="plan", crew_id=crew_a,
+        d = c["project_manager"].post("/transactions/preview", tx("labor", "PRJ-1042", "Civil-WBS-3", af, mode="plan", crew_id=crew_a,
                                                        plan_id=loaded["plan"]["id"])).json()
         assert d["lines"][0]["tolerance_status"] == "breach"
         assert d["lines"][1]["tolerance_status"] == "absent" and d["lines"][1]["cost"] == 0
@@ -109,7 +109,7 @@ class TestLabor:
     def test_manual_rate_math(self, c):
         lines = [{"resource_number": "E-10021", "hour_type": "OT", "hours": 2}, {"resource_number": "E-10024", "hour_type": "HW", "hours": 3},
                  {"resource_number": "E-10026", "hour_type": "IDLE", "hours": 1}]
-        d = c["foreman"].post("/transactions/preview", tx("labor", "PRJ-2088", "Piping-WBS-4", lines)).json()
+        d = c["project_manager"].post("/transactions/preview", tx("labor", "PRJ-2088", "Piping-WBS-4", lines)).json()
         assert [ln["rate"] for ln in d["lines"]] == [54.0, 25.0, 24.0]
         assert d["totals"]["cost"] == 108 + 75 + 24
 
@@ -129,7 +129,7 @@ class TestEquipment:
         assert r.status_code == 200
         d = r.json()
         assert d["status"] == "pending_step1" and d["validation"]["special"]["required"]
-        assert d["totals"]["cost"] == 2 * 210 + 30
+        assert c["admin"].get(f"/transactions/{d['id']}").json()["totals"]["cost"] == 2 * 210 + 30
         tid = d["id"]
         assert c["cost_controller"].post(f"/transactions/{tid}/approve", {"comment": ""}).status_code == 403  # wrong step
         assert c["project_manager"].post(f"/transactions/{tid}/approve", {"comment": "ok"}).json()["status"] == "pending_special"
@@ -266,7 +266,8 @@ class TestDashboard:
 # ---------- ERP ----------
 class TestErp:
     def test_not_configured(self, c):
-        assert c["admin"].get("/erp/status").json()["connected"] is False
+        if c["admin"].get("/erp/status").json()["connected"]:
+            pytest.skip("Real ERP connected - never POST /erp/push|sync|test from tests")
         for p, b in [("/erp/push", None), ("/erp/test", None), ("/erp/sync", {"entities": ["projects"]})]:
             r = c["admin"].post(p, b)
             assert r.status_code == 400 and "not configured" in r.json()["detail"], p

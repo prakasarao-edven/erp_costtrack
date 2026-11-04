@@ -1,5 +1,5 @@
 """Costing + validation + approval routing engine shared by labor, equipment and material."""
-from sqlalchemy import select
+from sqlalchemy import select, or_
 try:
     from backend.core import db, tables
 except ModuleNotFoundError:
@@ -80,21 +80,29 @@ async def price(tx: dict) -> dict:
     t = tx["type"]
     tc = cost = 0.0
     if t in ("labor", "equipment"):
-        rmap = {(r["key"], r["hour_type"]): r for r in await db.all(select(tables.rate_cards).where(tables.rate_cards.c['resource_type'] == t).limit(5000))}
+        rmap = {}
+        for r in await db.all(select(tables.rate_cards).where(tables.rate_cards.c['resource_type'] == t, tables.rate_cards.c['effective_from'] <= tx['date']).limit(5000)):
+            if r.get("effective_to") and r["effective_to"] < tx["date"]:
+                continue
+            k = (r["key"], r["hour_type"])
+            if k not in rmap or r["effective_from"] > rmap[k]["effective_from"]:
+                rmap[k] = r
         coll = tables.employees if t == "labor" else tables.equipment
-        res = {r["number"]: r for r in await db.all(select(coll).limit(10000))}
+        res = {r["number"]: r for r in await db.all(select(coll).limit(20000))}
         for ln in tx["lines"]:
             r = res.get(ln["resource_number"], {})
             ln["resource_name"] = r.get("name", ln.get("resource_name", ln["resource_number"]))
             key = r.get("grade") if t == "labor" else r.get("cls")
-            rc = rmap.get((key, ln["hour_type"]))
+            # rate lookup order: named resource override -> grade/class
+            rc = rmap.get((f"RES:{ln['resource_number']}", ln["hour_type"])) or rmap.get((key, ln["hour_type"]))
             rate = round(rc["base_rate"] * rc.get("multiplier", 1) + rc.get("premium", 0), 2) if rc else 0.0
             ln["present"] = ln.get("present", True)
             hrs = float(ln.get("hours") or 0) if ln["present"] else 0.0
             ln.update(hours=hrs, rate=rate, rate_key=key, rate_missing=rc is None, cost=round(hrs * rate, 2))
             tc += hrs
             cost += ln["cost"]
-        tx["totals"] = {"qty": round(tc, 2), "uom": "hrs", "cost": round(cost, 2)}
+        bonus = round(sum(float(b.get("amount") or 0) for b in tx.get("bonuses", [])), 2)
+        tx["totals"] = {"qty": round(tc, 2), "uom": "hrs", "cost": round(cost + bonus, 2), "bonus": bonus}
     else:
         items = {i["number"]: i for i in await db.all(select(tables.items).limit(10000))}
         uoms = set()
@@ -222,6 +230,14 @@ async def validate(tx: dict) -> dict:
         for ln in tx["lines"]:
             per[ln["resource_number"]] = per.get(ln["resource_number"], 0) + ln["hours"]
         errors += [f"{r}: {h}h in one day exceeds 24h" for r, h in per.items() if h > 24]
+    if t == "labor":
+        brs = {b["bonus_type"]: b for b in await db.all(select(tables.bonus_rates).limit(100))}
+        for b in tx.get("bonuses", []):
+            br = brs.get(b["bonus_type"])
+            hrs = sum(ln["hours"] for ln in tx["lines"] if ln["resource_number"] == b["resource_number"])
+            cap = (br["amount"] * hrs if br["basis"] == "per_hour" else br["amount"]) if br else 0
+            if b["amount"] > cap + 0.005:
+                reasons.append(f"{b['resource_number']} {b['bonus_type']} bonus ${b['amount']} above rate card (${round(cap, 2)})")
     if not tx["lines"]:
         errors.append("Add at least one line")
     v = {"budget": budget, "tolerance": tolerance, "special": {"required": bool(reasons), "reasons": reasons},
@@ -285,4 +301,12 @@ async def build_cost_transactions(tx: dict, s: dict) -> list[dict]:
                         "payload": {"ItemNumber": ln["item_number"], "ReturnedQuantity": ln["qty_returned"], "WastedQuantity": ln["qty_wasted"],
                                     "UnitOfMeasure": ln["uom"], "ProjectNumber": tx["project_number"], "TaskNumber": tx["task_number"],
                                     "TransactionDate": tx["date"], "ReasonCode": ln.get("reason_code", "")}})
+    for j, b in enumerate(tx.get("bonuses", [])):
+        if b["amount"] > 0:
+            ref = f"CB-{tx['ref']}-B{j + 1}"
+            out.append({"ref": ref, "kind": "project_cost", "amount": b["amount"], "payload": {
+                "TransactionSource": o["transaction_source"], "Document": o["document"][t], "DocumentEntry": o["document_entry"][t],
+                "ProjectNumber": tx["project_number"], "TaskNumber": tx["task_number"], "ExpenditureItemDate": tx["date"],
+                "ExpenditureType": f"Labor - Bonus ({b['bonus_type']})", "PersonNumber": b["resource_number"], "Quantity": 1,
+                "RawCostInTransactionCurrency": b["amount"], "TransactionCurrency": s.get("currency", "USD"), "OriginalTransactionReference": ref}})
     return out

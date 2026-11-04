@@ -1,0 +1,53 @@
+{
+  "summary": "Tested Wave-1 Master Data and the redesigned labor/equipment entry, backend and UI. New pytest file test_master_data.py: 15/15 pass. It covers the summary, source modes (ERP mode blocks create and bulk-create, only admin can change modes), local CRUD with key uppercasing, duplicate/ERP-key/bad-key rejection, tasks requiring an existing project, ERP lock (non-LO field edits return 400; projects.site and employees.badge_id allowed and then reverted), DELETE of ERP or referenced records returning 409, an inactive employee disappearing from /master and being rejected by a transaction, bulk validate/commit/update, ERP bulk rows, bonus totals plus the bonus cost line after full approval, RES:E-10021 rate override, WKD/HOL rates, bonus-rate edit and restore, and equipment DOWN requiring a reason. UI (Playwright, admin, foreman and master_data_admin) passed for: Master Data tiles with counts, mode select (ERP hides New, restored to hybrid), ERP form note with disabled non-LO fields, local create, Deactivate/Reactivate, source filter, bulk CSV validate (New 1 / Error 2 with row messages) and commit; labor matrix with REG/OT/IDLE/HW/WKD/HOL columns, Load from plan (3 people, E-10022 REG 8 + OT 1 with plan hints), Safety $10 and Bad Weather 2.5 x 9h = $22.50, Apply defaults, Present uncheck, totals including bonus, submit, and approval to approved with B1/B2 bonus cost lines; equipment matrix with the DOWN-without-reason error blocking submit; Bonuses tab; Weekend/Holiday rate rows; planning grid columns; material Load from plan; approvals queue. Main gaps: the foreman role can see costs and gets no bonus pre-fill, and bonuses are not validated on the backend.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/transactions (+ /preview) bonuses[]", "issue": "Bonuses are not validated at all. Accepted with HTTP 200: resource_number E-99999 (not on any line and not an employee), bonus_type 'Bogus' (not an active BONUS_TYPE lookup), amount 5000 (no check against bonus_rates). Bonuses are also accepted for rows marked absent (present=false). Add these checks in _check_master: the resource must be one of the present line resources, the type must be an active BONUS_TYPE, and consider limiting the amount to the rate card or flagging it for special approval.", "priority": "HIGH"},
+      {"endpoint": "POST /api/transactions/preview (foreman)", "issue": "The Est. cost column is hidden for the foreman, but the preview response still returns lines[].rate, lines[].cost and totals.cost. The UI also shows them: ValidationPanel 'Totals & Routing' displayed $854.00 to the foreman. Rates leak to the foreman role.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "DELETE /api/md/projects/{id}", "issue": "A local project that has local tasks can be deleted, which orphans the tasks: _referenced only checks transactions. The same applies to employees used in crews or plans, and to lookups (e.g. a GRADE) used by employees, because lookups have ref=None."},
+      {"endpoint": "POST /api/md/{entity}/{id}/status", "issue": "Allows deactivating ERP-sourced records. The UI hides the button for ERP records but the API does not enforce it. Decide whether ERP status should only come from the ERP."},
+      {"endpoint": "_clean / lookups", "issue": "Lookup 'order' and other number fields (except unit_cost) are stored as strings."},
+      {"endpoint": "PUT /api/bonus-rates/{id}", "issue": "Edits in place and loses history (no new effective-dated row). The UI bonusDefault picks the first bonus_rate matching the type and ignores effective_from/effective_to."},
+      {"endpoint": "seed migrate() / sample plans", "issue": "The sample crew and material plans for PRJ-1042 cover 2026-10-01..2026-10-31. The container date is now 2026-11-04, so 'Load from plan' for today returns 'No published plan'. I tested with date 2026-10-15. This also causes 8 older regression tests that use date.today() to fail (test_costbridge_api TestLabor/TestPlanning/TestSetup/TestMaterial, test_material_autofill, test_costbridge_bugs). These are environment/date failures, not code regressions. Roll the sample plan window forward in migrate(), or make the tests use the plan's own dates."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "UsageEntry bonus pre-fill (foreman)", "issue": "/master strips bonus_rates.amount for the foreman, so selecting Safety or Bad Weather leaves Bonus $ blank for the main capture role. The defaults only work for admin/PM. Option: send the amount but not the labor rate, or compute the default on the server.", "selector": "[data-testid=labor-row-0-bonus-amount]", "priority": "MEDIUM"},
+      {"component": "UsageEntry Bad Weather (per_hour) bonus", "issue": "The amount is computed only when the bonus type is selected. If hours change afterwards (e.g. Apply defaults adds OT 2h, going from 9h to 11h), the amount stays at 22.5 and is not recalculated.", "selector": "[data-testid=labor-row-1-bonus-amount]", "priority": "LOW"},
+      {"component": "MasterList form", "issue": "Select fields go blank when the value is not in the options. ERP project status 'Approved' is not in [Draft, Active, On Hold, Closed], and the employee/project Status is blank when the record has no status field (it should default to Active).", "selector": "[data-testid=md-field-status]", "priority": "LOW"},
+      {"component": "MasterList rows", "issue": "The md-row-{fields[0]} testid is not unique for tasks (it uses project_number) or lookups (it uses type).", "selector": "[data-testid^=md-row-]", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Equipment/labor Add row", "issue": "A newly added empty row (resource '') triggers a preview call that returns 400 'Unknown or inactive' (console error). Skip the preview while any row has no resource.", "affected_selectors": ["[data-testid=equipment-add-line-btn]"]}
+    ],
+    "design_issues": [
+      {"screen": "/labor matrix at 1920px", "issues": ["Column widths are uneven: the IDLE input is very narrow (~30px) while HARSH WEATHER is wide.", "The table overflows horizontally and the Est. cost column is clipped ('$298.'), so a full row cannot be seen without scrolling at 1920px desktop width. Give the hour columns a fixed equal width (e.g. w-16) and drop the trailing empty column."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_master_data.py", "/app/test_reports/pytest/pytest_iter3.xml", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Validate bonuses server-side: resource is a present line, type is an active BONUS_TYPE, and the amount is sane or flagged.",
+    "Hide rate and cost fields from the foreman in the /transactions/preview response and in ValidationPanel totals.",
+    "Make the bonus pre-fill work for the foreman: provide bonus amounts or compute the default on the server.",
+    "Recompute per-hour bonus amounts when hours change.",
+    "Block deletion of local projects that have tasks, and of employees used in crews or plans (or extend _referenced).",
+    "Roll the sample plan dates forward in migrate() so 'Load from plan' works for today. The older regression tests depend on this.",
+    "Labor matrix layout: give hour-type columns equal widths and keep Est. cost visible at 1920px."
+  ],
+  "critical_code_review_comments": [
+    "masterdata.bulk: rows that include 'id' skip _clean, so they are not normalised or validated.",
+    "masterdata._save for ERP records: clearing a non-LO field (setting it to '' or None) is silently ignored rather than rejected. That is acceptable, but no message is shown.",
+    "api/master: returns up to 20000 employees on every page load (6.5k ERP workers) and MasterList renders a 3000-option datalist. This will get slow; consider server-side search.",
+    "MasterList search sends a request on every keystroke with no debounce, so stale responses can overwrite newer ones.",
+    "test_costbridge_api.TestErp.test_not_configured used to POST /erp/push and /erp/sync when its first assert passed. It now skips when a real ERP is connected (edited)."
+  ],
+  "updated_files": ["/app/backend/tests/test_master_data.py (new)", "/app/backend/tests/test_costbridge_api.py (TestErp.test_not_configured now skips when ERP is connected)"],
+  "success_rate": {"backend": "15/15 new master-data tests pass; 2 HIGH validation/leak issues found by manual API probe; 8 older date-dependent regression tests fail because the seed plan window expired, not because of code regressions", "frontend": "~90% (all requested flows work; foreman bonus pre-fill and cost leak, plus layout issues)"},
+  "seed_data_creation": "None kept. Cleaned up everything by id: TEST-P*/TEST-E*/TEST-B* records and the UI records TEST-UI1/TEST-UIS1 deleted via the API; the RES:E-10021 rate card, LAB-00022 (UI submit) and its 6 cost_transactions, and 8 transactions + 5 cost_transactions + 3 plans created by the old regression suite were deleted from Mongo by id. Source modes restored to hybrid, Safety bonus back to 10, project 00009805 site back to 'Yard 3', ERP employee badge_id unset. The project TEST-P1 ('TEST_ Local Project', created 2026-11-04 07:18 by Test Admin) existed before my run and was not touched.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Container date is 2026-11-04 but the sample plans cover 2026-10-01..31, so use date 2026-10-15 for Load from plan (PRJ-1042 / Civil-WBS-3 / Crew-A). Tickets: python3 /app/scripts/test_users.py --tickets (master_data_admin included). The old regression suite creates transactions (some approved, with queued cost_transactions) and plans and does not fully clean up, so delete them by id afterwards. Mongo is mongodb://localhost:27017, db test_database. Never call /erp/sync or /erp/push: a real Oracle ERP is connected."
+}

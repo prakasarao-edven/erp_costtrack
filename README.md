@@ -51,7 +51,9 @@ No MongoDB data is deleted or automatically imported. The new local database sta
 with the existing sample dataset. A rollback requires restoring the previous backend
 code/dependencies and its original MongoDB configuration. Keep both databases until
 any real-data migration has been verified. Future schema changes need explicit migrations;
-startup only creates missing tables.
+startup creates missing tables and applies the idempotent `002_master_data` upgrade
+for master fields, bonuses, dated rates and fractional hour-type ordering. The upgrade
+preserves existing rows and allows multiple rate versions with different effective dates.
 
 ## Verification
 

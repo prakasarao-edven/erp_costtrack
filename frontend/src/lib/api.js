@@ -29,6 +29,6 @@ export const num = (n, d = 1) => (n === null || n === undefined || n === "" ? "-
 export const today = () => new Date().toISOString().slice(0, 10);
 
 export const ROLE_LABEL = {
-  admin: "Admin", cost_controller: "Cost Controller", project_manager: "Project Manager",
+  admin: "Admin", master_data_admin: "Master Data Admin", cost_controller: "Cost Controller", project_manager: "Project Manager",
   store_manager: "Store Manager", foreman: "Foreman", pending: "Awaiting access",
 };

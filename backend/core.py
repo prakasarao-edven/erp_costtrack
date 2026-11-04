@@ -23,7 +23,7 @@ except ModuleNotFoundError:
 db = Database(os.environ["DATABASE_URL"])
 
 # Highest first; "pending" has no access until an admin assigns a role.
-ROLES = ["admin", "cost_controller", "project_manager", "store_manager", "foreman", "pending"]
+ROLES = ["admin", "master_data_admin", "cost_controller", "project_manager", "store_manager", "foreman", "pending"]
 DEFAULT_ROLE = "pending"
 RETIRED_ROLES = {}
 RANK = {r: len(ROLES) - i for i, r in enumerate(ROLES)}

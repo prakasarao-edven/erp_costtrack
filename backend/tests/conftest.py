@@ -11,7 +11,7 @@ import requests
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ROLES = ["admin", "project_manager", "cost_controller", "foreman", "store_manager", "pending"]
+ROLES = ["admin", "master_data_admin", "project_manager", "cost_controller", "foreman", "store_manager", "pending"]
 
 
 BASE = os.environ.get("REACT_APP_BACKEND_URL", "http://127.0.0.1:8001").rstrip("/") + "/api"
@@ -46,6 +46,10 @@ def local_client():
     async def seed_users():
         await db.insert_many(tables.users, [{"user_id": "test-" + role, "role": role, "env": ENV,
                                             "name": "Test " + role, "email": role + "@example.test"} for role in ROLES])
+        await db.insert_many(tables.projects, [{"id": "erp-test-project", "number": "00009805", "name": "ERP test project",
+                                               "source": "oracle", "status": "Active"}])
+        await db.insert_many(tables.employees, [{"id": "erp-test-employee", "number": "ERP-100", "name": "ERP test worker",
+                                                "grade": "Skilled", "source": "oracle", "status": "Active"}])
 
     async def cleanup():
         async with db.engine.begin() as connection:
@@ -84,6 +88,16 @@ def tokens():
     out = subprocess.run([sys.executable, str(ROOT / "scripts/test_users.py"), "--tokens"],
                          capture_output=True, text=True, timeout=120, check=True).stdout
     return json.loads(out)
+
+
+@pytest.fixture(scope="session")
+def sql(local_client):
+    from backend.core import db
+
+    def execute(statement):
+        return local_client.portal.call(db.execute, statement)
+
+    return execute
 
 
 class Client:

@@ -1,0 +1,38 @@
+{
+  "summary": "Retested the iteration_3 fixes. New pytest file /app/backend/tests/test_iter4_fixes.py: 16/16 pass on the first run, then 15 pass and 1 skips after the owner switched employees to ERP mode. It covers: bonus for a resource not on any row or on an absent row returns 400 on preview and create; unknown or inactive BONUS_TYPE returns 400; Safety $10 and Bad Weather 2.5 x 9h = $22.50 are not flagged, while $10.50 and $23 are flagged validation.special with 'above rate card'; a $50 bonus on submit is accepted and routed to approval; foreman redaction on preview, create, list and get (no lines rate/cost, no totals.cost, cost_transactions empty) while admin and PM still see costs and the DB keeps the cost; foreman /master now includes bonus amounts; DELETE of a local project with tasks returns 409 and works once the task is deleted; DELETE of an employee used in a plan returns 409 and works once the plan is deleted; status change on an ERP project returns 400 and leaves it unchanged; lookup order is stored as a number; autofill today for PRJ-1042/Civil-WBS-3/Crew-A returns the plan. Regression test_master_data.py: 14 pass, 1 skip (employees in ERP mode); bonus submit to full approval with a B1 cost line passes. UI (Playwright): as foreman on /labor, Load from plan gives 3 rows, there is no Est. cost column and no $ total in the ValidationPanel, Safety pre-fills 10, Bad Weather pre-fills 22.5, recalculates to 27.5 after OT is set to 3 and to 25 after Apply defaults (8+2), Add row gives no 400, and submit gives LAB-00045 pending step1. As admin, the Est. cost column and the $864.00 total show. MasterList: ERP project 300000079140539 shows status 'Approved' (disabled, ERP note shown, no Deactivate button); New defaults status to Active; task row testids are unique (500/500, md-row-PI50001-0) and so are lookup testids (40/40, md-row-BONUS_TYPE-SAFETY); lookup order shows 34. All requested fixes are verified. The remaining issues are small and listed below.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/dashboard (foreman)", "issue": "The foreman Dashboard still shows $ actual, approved and pending cost, plus $ per task and resource type. Rate redaction covers transactions only. Decide whether the dashboard should hide $ for the foreman."},
+      {"endpoint": "_check_master bonuses", "issue": "Duplicate bonuses for the same resource and type are not rejected, and the absent-row check returns 400 instead of ignoring a stale bonus (see the UI bug)."},
+      {"endpoint": "masterdata._referenced", "issue": "Employees in crews (if crews hold members), lookups used by employees (GRADE, CRAFT etc.) and tasks used in plans are still not checked before delete. The project-with-tasks and employee-in-plan cases are fixed."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "UsageEntry labor: absent row with flat bonus", "issue": "If Safety is set on a row and the row is then unchecked (Present off), the bonus stays in e.bonuses and preview returns 400 'employee must be on a present row'. useEntry swallows the error (setPreview(null)), so the ValidationPanel disappears without a message and Submit stays enabled; the user only sees an error toast on submit. Fix: filter bonuses with r.present && r.resource_number in the UsageEntry setBonuses effect, and show preview errors inline.", "selector": "[data-testid=labor-row-0-present-checkbox]", "priority": "MEDIUM"},
+      {"component": "RecentEntries (foreman)", "issue": "The Cost column shows '$0.00' for every entry because totals.cost is now redacted. Hide the column for the foreman, as UsageEntry does with showRates.", "selector": "My recent entries table", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_iter4_fixes.py", "/app/backend/tests/test_master_data.py", "/app/test_reports/pytest/iter4_results.xml"],
+  "action_items": [
+    "UsageEntry: drop bonuses for absent rows and rows without a resource before sending; show the preview API error inline instead of silently clearing the preview",
+    "RecentEntries: hide the Cost column for the foreman (it shows $0.00)",
+    "Decide on foreman dashboard $ visibility",
+    "Update outdated tests in test_costbridge_api.py (5 fail): they read cost/rate as foreman (now redacted by design) and post mode=plan without plan_id, so tolerance is 'unplanned' and the stopper is not hit. Use admin for cost asserts and pass plan_id=af['plan']['id']. They also leave TEST_iter1 transactions and plans behind and should clean up by id."
+  ],
+  "critical_code_review_comments": [
+    "The test_master_data.py cleanup used to force all source modes to hybrid. It overwrote the owner's change (krishna.adalath set employees=erp at 07:34:23). Fixed: it now restores the modes captured at start.",
+    "_redact mutates the dict in place. This is safe now because it runs after insert, but redacting a copy is safer.",
+    "The engine bonus cap uses the first bonus_rate per type and ignores effective dates (carried over from iteration 3)."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter4_fixes.py (new)", "/app/backend/tests/test_master_data.py (restore original source modes instead of forcing hybrid; skip local-employee test when employees are in ERP mode; foreman bonus amount test updated to the new intended behavior)"],
+  "success_rate": {"backend": "100% of requested fixes (31 pass, 2 skipped due to employees ERP mode); 5 outdated legacy tests in test_costbridge_api.py fail", "frontend": "100% of requested flows; 2 minor UI bugs"},
+  "seed_data_creation": "None kept. TEST_ projects, tasks, employees, lookups and plans were created and deleted by id. Transactions LAB-00038..45, EQP-00011 and MAT-00008 (from the legacy suite and the UI submit) were deleted by id with their cost_transactions (none were pushed). The legacy suite's 2 plans were deleted. No ERP sync or push was called.",
+  "data_defect_note": "The owner set source mode employees=ERP at 07:34:23. A test cleanup (the old forced-hybrid fixture, run by me and/or a concurrent run at 07:34:47) reset it to hybrid. I restored employees=erp directly in settings.source_modes. Current modes: employees=erp, all others hybrid. The main agent should confirm with the owner.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Use test_iter4_fixes.py and test_master_data.py for regression. Employees source mode is currently ERP (owner's choice), so local employee tests skip. Do not force modes to hybrid; restore the original values. Tickets are single use per browser session: run test_users.py --tickets for each browser_automation call and click the sidebar 'Labor Entry' after sign-in (page.goto loses the session). Sample plans now cover Nov 2026."
+}

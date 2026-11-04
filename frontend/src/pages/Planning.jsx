@@ -9,7 +9,6 @@ import { errMsg, today, usd, useApi } from "@/lib/api";
 import NewCrewDialog from "@/components/NewCrewDialog";
 
 const SHIFTS = ["Day Shift (06:00-14:00)", "Evening Shift (14:00-22:00)", "Night Shift (22:00-06:00)"];
-const COLS = [["REG", "Regular"], ["OT", "OT"], ["IDLE", "Idle"], ["HW", "Harsh Weather"], ["MAINT", "Maintenance"], ["DOWN", "Downtime"]];
 
 const blank = (kind) => ({ kind, project_number: "", task_number: "", crew_id: "", shift: SHIFTS[0], period_type: "monthly",
   start_date: today(), end_date: today(), lines: [] });
@@ -32,6 +31,7 @@ const PlanList = ({ plans, onOpen, crews, activeId }) => (
 );
 
 const CrewGrid = ({ plan, setPlan, master }) => {
+  const COLS = [...new Map(master.hour_types.map((h) => [h.code, [h.code, h.name]])).values()];
   const htFor = (rt) => master.hour_types.filter((h) => h.resource_type === rt).map((h) => h.code);
   const opts = {
     labor: master.employees.map((r) => ({ value: r.number, label: `${r.number} - ${r.name}` })),
@@ -43,7 +43,7 @@ const CrewGrid = ({ plan, setPlan, master }) => {
       <table className="w-full" data-testid="crew-plan-grid">
         <thead><tr><th className="cb-th">Resource / Equipment</th>{COLS.map(([c, l]) => <th key={c} className="cb-th text-right">{l}</th>)}<th className="cb-th" /></tr></thead>
         <tbody>
-          {plan.lines.length === 0 && <tr><td colSpan={8} className="p-6 text-center text-sm text-muted-foreground">Add employees and equipment to this crew plan.</td></tr>}
+          {plan.lines.length === 0 && <tr><td colSpan={COLS.length + 2} className="p-6 text-center text-sm text-muted-foreground">Add employees and equipment to this crew plan.</td></tr>}
           {plan.lines.map((ln, i) => {
             const allowed = htFor(ln.resource_type);
             return (
