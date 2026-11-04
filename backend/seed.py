@@ -61,6 +61,10 @@ BONUS_RATES = [("Safety", "per_day", 10.0), ("Bad Weather", "per_hour", 2.5), ("
 
 async def migrate():
     """Idempotent additions for the master data module."""
+    today = date.today()
+    first, last = today.replace(day=1), today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    await db.plans.update_many({"created_by": "Sample data", "end_date": {"$lt": today.isoformat()}},
+                               {"$set": {"start_date": first.isoformat(), "end_date": last.isoformat()}})
     if not await db.lookups.count_documents({}):
         await db.lookups.insert_many([{"id": new_id(), "type": t, "code": c.upper().replace(" ", "_").replace("&", "N"), "meaning": c,
                                        "order": i, "status": "Active", "source": "local"} for i, (t, c) in enumerate(LOOKUPS)])

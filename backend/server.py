@@ -99,7 +99,6 @@ async def master(member: dict = Depends(all_active())):
         out[name] = await db[name].find({}, P).to_list(10000)
     if member["role"] == "foreman":
         out["items"] = [{k: v for k, v in i.items() if k != "unit_cost"} for i in out["items"]]
-        out["bonus_rates"] = [{k: v for k, v in b.items() if k != "amount"} for b in out["bonus_rates"]]
     out["hour_types"] = await db.hour_types.find({}, P).sort("order", 1).to_list(100)
     out["settings"] = await get_settings()
     return out
@@ -312,6 +311,14 @@ async def _check_master(body: TxIn):
             raise HTTPException(400, "Item is required on every line")
         if body.type != "material" and (not ln.resource_number or not ln.hour_type):
             raise HTTPException(400, "Resource and Hour Type are required on every line")
+    if body.bonuses:
+        present = {ln.resource_number for ln in body.lines if ln.present}
+        types = {l["meaning"] for l in await db.lookups.find({"type": "BONUS_TYPE", "status": {"$ne": "Inactive"}}, P).to_list(100)}
+        for b in body.bonuses:
+            if b.resource_number not in present:
+                raise HTTPException(400, f"Bonus for {b.resource_number}: employee must be on a present row")
+            if b.bonus_type not in types:
+                raise HTTPException(400, f"Unknown bonus type {b.bonus_type}")
     coll, key = {"labor": (db.employees, "resource_number"), "equipment": (db.equipment, "resource_number"), "material": (db.items, "item_number")}[body.type]
     nums = {getattr(ln, key) for ln in body.lines}
     known = {d["number"] for d in await coll.find({"number": {"$in": list(nums)}, "status": {"$nin": ["Inactive", "Disposed"]}}, {"_id": 0, "number": 1}).to_list(10000)}
@@ -359,13 +366,25 @@ async def _create_costs(tx: dict, s: dict):
             "created_at": now_iso(), "attempts": 0, "response": None})
 
 
+def _redact(tx: dict, member: dict) -> dict:
+    """Foremen see hours and quantities, not cost rates (BRD addendum access rules)."""
+    if member["role"] != "foreman":
+        return tx
+    for ln in tx.get("lines", []):
+        for k in ("rate", "cost", "unit_cost", "wastage_cost", "rate_key"):
+            ln.pop(k, None)
+    if tx.get("totals"):
+        tx["totals"] = {k: v for k, v in tx["totals"].items() if k != "cost"}
+    return tx
+
+
 @api.post("/transactions/preview")
 async def preview(body: TxIn, member: dict = Depends(all_active())):
     _check_capture(body.type, member)
     await _check_master(body)
     tx = _tx_from(body)
     await validate(tx)
-    return tx
+    return _redact(tx, member)
 
 
 @api.post("/transactions")
@@ -379,7 +398,7 @@ async def create_tx(body: TxIn, member: dict = Depends(all_active())):
     await db.transactions.insert_one(tx)
     await audit("transaction", tx["id"], f"created ({tx['status']})", member, {"ref": tx["ref"], "cost": tx["totals"]["cost"]})
     tx.pop("_id", None)
-    return tx
+    return _redact(tx, member)
 
 
 @api.put("/transactions/{tx_id}")
@@ -399,7 +418,7 @@ async def update_tx(tx_id: str, body: TxIn, member: dict = Depends(all_active())
     tx.pop("rejection_reason", None) if tx["status"] != "rejected" else None
     await db.transactions.replace_one({"id": tx_id}, tx)
     await audit("transaction", tx_id, f"updated ({tx['status']})", member, {"cost": tx["totals"]["cost"]})
-    return tx
+    return _redact(tx, member)
 
 
 @api.get("/transactions")
@@ -414,7 +433,8 @@ async def list_tx(type: Optional[str] = None, status: Optional[str] = None, proj
         q["project_number"] = project_number
     if mine or member["role"] in ("foreman", "store_manager"):
         q["created_by_id"] = member["user_id"]
-    return await db.transactions.find(q, P).sort("created_at", -1).to_list(2000)
+    rows = await db.transactions.find(q, P).sort("created_at", -1).to_list(2000)
+    return [_redact(t, member) for t in rows]
 
 
 @api.get("/transactions/{tx_id}")
@@ -426,8 +446,8 @@ async def get_tx(tx_id: str, member: dict = Depends(all_active())):
     if not tx:
         raise HTTPException(404, "Not found")
     tx["audit"] = await db.audit.find({"entity_id": tx_id}, P).sort("at", 1).to_list(500)
-    tx["cost_transactions"] = await db.cost_transactions.find({"transaction_id": tx_id}, P).to_list(500)
-    return tx
+    tx["cost_transactions"] = await db.cost_transactions.find({"transaction_id": tx_id}, P).to_list(500) if member["role"] != "foreman" else []
+    return _redact(tx, member)
 
 
 # ---------- Approvals ----------

@@ -30,7 +30,7 @@ const toRows = (lines, bonuses = []) => {
   return [...m.values()];
 };
 
-const toLines = (rows, codes, reasonCodes) => rows.flatMap((r) => codes.filter((c) => (r.hours[c] ?? 0) > 0 || r.planned[c] != null).map((c) => ({
+const toLines = (rows, codes, reasonCodes) => rows.filter((r) => r.resource_number).flatMap((r) => codes.filter((c) => (r.hours[c] ?? 0) > 0 || r.planned[c] != null).map((c) => ({
   resource_number: r.resource_number, hour_type: c, hours: r.present ? Number(r.hours[c] || 0) : 0, present: r.present,
   plan_line: r.planned[c] != null, planned_hours: r.planned[c] ?? undefined, reason_code: reasonCodes.includes(c) && r.reason_code ? r.reason_code : undefined,
 })));
@@ -63,14 +63,16 @@ export default function UsageEntry({ type }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [e.editing]);
 
-  const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const bonusDefault = (r, bt) => {
     const br = master.bonus_rates.find((b) => b.bonus_type === bt);
     if (!br || br.amount == null) return "";
-    const hrs = Object.values(r.hours).reduce((s, v) => s + Number(v || 0), 0);
+    const hrs = r.present ? Object.values(r.hours).reduce((s, v) => s + Number(v || 0), 0) : 0;
     return Math.round((br.basis === "per_hour" ? br.amount * hrs : br.amount) * 100) / 100;
   };
-  const applyDefaults = () => setRows((rs) => rs.map((r) => (r.present ? { ...r, hours: { ...r.hours, ...Object.fromEntries(Object.entries(defaults).filter(([, v]) => v !== "" && v != null)) } } : r)));
+  const perHour = (bt) => master.bonus_rates.find((b) => b.bonus_type === bt)?.basis === "per_hour";
+  const withBonus = (r) => (r.bonus_type && perHour(r.bonus_type) ? { ...r, bonus_amount: bonusDefault(r, r.bonus_type) } : r);
+  const setRow = (i, patch) => setRows((rs) => rs.map((r, j) => (j === i ? (("hours" in patch || "present" in patch) ? withBonus({ ...r, ...patch }) : { ...r, ...patch }) : r)));
+  const applyDefaults = () => setRows((rs) => rs.map((r) => (r.present ? withBonus({ ...r, hours: { ...r.hours, ...Object.fromEntries(Object.entries(defaults).filter(([, v]) => v !== "" && v != null)) } }) : r)));
   const loadPlan = async () => {
     const h = e.header;
     if (!h.project_number || !h.task_number || !h.crew_id || !h.date) return toast.error("Select project, task, crew and date first");
@@ -140,7 +142,7 @@ export default function UsageEntry({ type }) {
                       : <Pick listId={`${type}-res-list`} testid={`${t}-resource-select`} value={r.resource_number} options={resOptions} onChange={(v) => setRow(i, { resource_number: v })} />}
                   </td>
                   {codes.map((c) => (
-                    <td key={c} className="cb-td w-20">
+                    <td key={c} className="cb-td min-w-[84px]">
                       <input type="number" min="0" max="24" step="0.5" className="cb-input num text-right" disabled={!r.present} data-testid={`${t}-hours-${c}`}
                         value={r.present ? r.hours[c] ?? "" : ""} onChange={(ev) => setRow(i, { hours: { ...r.hours, [c]: ev.target.value === "" ? null : Number(ev.target.value) } })} />
                       {r.planned[c] != null && <div className="num mt-0.5 text-right text-[10px] text-muted-foreground">plan {r.planned[c]}</div>}

@@ -231,6 +231,14 @@ async def validate(tx: dict) -> dict:
         for ln in tx["lines"]:
             per[ln["resource_number"]] = per.get(ln["resource_number"], 0) + ln["hours"]
         errors += [f"{r}: {h}h in one day exceeds 24h" for r, h in per.items() if h > 24]
+    if t == "labor":
+        brs = {b["bonus_type"]: b for b in await db.bonus_rates.find({}, {"_id": 0}).to_list(100)}
+        for b in tx.get("bonuses", []):
+            br = brs.get(b["bonus_type"])
+            hrs = sum(ln["hours"] for ln in tx["lines"] if ln["resource_number"] == b["resource_number"])
+            cap = (br["amount"] * hrs if br["basis"] == "per_hour" else br["amount"]) if br else 0
+            if b["amount"] > cap + 0.005:
+                reasons.append(f"{b['resource_number']} {b['bonus_type']} bonus ${b['amount']} above rate card (${round(cap, 2)})")
     if not tx["lines"]:
         errors.append("Add at least one line")
     v = {"budget": budget, "tolerance": tolerance, "special": {"required": bool(reasons), "reasons": reasons},

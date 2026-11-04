@@ -52,7 +52,7 @@ def _clean(entity: str, data: dict) -> dict:
             out[k] = str(out[k]).upper().replace(" ", "")
             if not CODE.match(out[k]):
                 raise ValueError(f"{k}: uppercase letters/digits, no spaces, max 30 chars")
-    for k in ("unit_cost",):
+    for k in ("unit_cost", "order"):
         if out.get(k) not in (None, ""):
             out[k] = float(out[k])
     missing = [k for k in ENT[entity]["req"] if out.get(k) in (None, "")]
@@ -64,6 +64,10 @@ def _clean(entity: str, data: dict) -> dict:
 
 
 async def _referenced(entity: str, doc: dict) -> bool:
+    if entity == "projects" and await db.tasks.find_one({"project_number": doc["number"]}, {"_id": 1}):
+        return True
+    if entity in ("employees", "equipment") and await db.plans.find_one({"lines.resource_number": doc["number"]}, {"_id": 1}):
+        return True
     ref = ENT[entity]["ref"]
     if not ref:
         return False
@@ -184,9 +188,12 @@ class StatusIn(BaseModel):
 @md.post("/{entity}/{rid}/status")
 async def set_status(entity: str, rid: str, body: StatusIn, member: dict = Depends(require_role(*EDITORS))):
     _ent(entity)
-    res = await db[entity].update_one({"id": rid}, {"$set": {"status": body.status, "updated_at": now_iso(), "updated_by": member.get("name")}})
-    if not res.matched_count:
+    doc = await db[entity].find_one({"id": rid}, P)
+    if not doc:
         raise HTTPException(404, "Not found")
+    if is_erp(doc):
+        raise HTTPException(400, "ERP record - status is controlled by the ERP")
+    await db[entity].update_one({"id": rid}, {"$set": {"status": body.status, "updated_at": now_iso(), "updated_by": member.get("name")}})
     await audit(entity, rid, f"status {body.status}", member)
     return {"ok": True}
 
@@ -219,7 +226,7 @@ async def bulk(entity: str, body: BulkIn, member: dict = Depends(require_role(*E
     for i, raw in enumerate(body.rows):
         row = {k: v for k, v in raw.items() if v not in (None, "")}
         try:
-            probe = _clean(entity, row) if not row.get("id") else row
+            probe = _clean(entity, {k: v for k, v in row.items() if k != "id"})
             key = tuple(probe.get(k) for k in e["key"])
             if key in seen:
                 raise ValueError("Duplicate key in file")

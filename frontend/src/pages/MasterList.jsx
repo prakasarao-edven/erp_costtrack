@@ -20,9 +20,10 @@ const download = (name, text) => {
 
 const Input = ({ f, value, onChange, locked, lookups, master }) => {
   const [key, , type, , opt] = f;
-  const p = { disabled: locked, "data-testid": `md-field-${key}`, value: value ?? "", onChange: (e) => onChange(e.target.value) };
-  if (type === "select") return <Sel {...p} placeholder="" options={opt.filter(Boolean).map((o) => ({ value: o, label: o }))} />;
-  if (type === "lookup") return <Sel {...p} placeholder="" options={lookups.filter((l) => l.type === opt).map((l) => ({ value: l.meaning, label: l.meaning }))} />;
+  const p = { disabled: locked, "data-testid": `md-field-${key}`, value: value ?? (key === "status" ? "Active" : ""), onChange: (e) => onChange(e.target.value) };
+  const withCur = (opts) => (value && !opts.some((o) => o.value === value) ? [{ value, label: value }, ...opts] : opts);
+  if (type === "select") return <Sel {...p} placeholder="" options={withCur(opt.filter(Boolean).map((o) => ({ value: o, label: o })))} />;
+  if (type === "lookup") return <Sel {...p} placeholder="" options={withCur(lookups.filter((l) => l.type === opt).map((l) => ({ value: l.meaning, label: l.meaning })))} />;
   if (type === "project") return <Sel {...p} placeholder="" options={master.projects.map((x) => ({ value: x.number, label: `${x.number} - ${x.name}` }))} />;
   if (type === "store") return <Sel {...p} placeholder="" options={master.stores.map((x) => ({ value: x.code, label: `${x.code} - ${x.name}` }))} />;
   if (type === "employee") return <input list="md-emp-list" className="cb-input" {...p} placeholder="Employee #" />;
@@ -76,7 +77,7 @@ export default function MasterList() {
           <table className="w-full" data-testid="md-table">
             <thead><tr>{cfg.cols.map((c) => <th key={c} className="cb-th">{cfg.fields.find((x) => x[0] === c)?.[1] || c}</th>)}<th className="cb-th">Source</th></tr></thead>
             <tbody>{d.rows.map((r) => (
-              <tr key={r.id} className="cb-row cursor-pointer" onClick={() => setRec(r)} data-testid={`md-row-${r[cfg.fields[0][0]]}`}>
+              <tr key={r.id} className="cb-row cursor-pointer" onClick={() => setRec(r)} data-testid={`md-row-${cfg.fields[0][0] === "number" || cfg.fields[0][0] === "code" ? r[cfg.fields[0][0]] : `${r[cfg.fields[0][0]]}-${r[cfg.fields[1][0]]}`}`}>
                 {cfg.cols.map((c) => <td key={c} className="cb-td text-sm">{c === "status" ? <StatusBadge status={r.status === "Inactive" ? "rejected" : "ok"} label={r.status || "Active"} /> : String(r[c] ?? "")}</td>)}
                 <td className="cb-td text-xs">{r.source === "oracle" ? <span className="flex items-center gap-1 text-blue-300"><Lock className="h-3 w-3" />ERP</span> : "Local"}</td>
               </tr>
