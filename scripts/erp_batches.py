@@ -1,16 +1,17 @@
 """Prints the latest ERP batch log entries (preview DB)."""
 import asyncio
-import os
+import sys
+from pathlib import Path
 
-from dotenv import load_dotenv
-from motor.motor_asyncio import AsyncIOMotorClient
+from sqlalchemy import select
 
-load_dotenv("/app/backend/.env")
-db = AsyncIOMotorClient(os.environ["MONGO_URL"])[os.environ["DB_NAME"]]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from backend.core import db, tables
 
 
 async def main():
-    rows = await db.erp_batches.find({}, {"_id": 0}).sort("started_at", -1).to_list(5)
+    rows = await db.all(select(tables.erp_batches).order_by(tables.erp_batches.c.started_at.desc()).limit(5))
     print(" ".join(f"{b['entity']}:{b['status']}:{b.get('count')}:{(b.get('error') or '')[:150]}" for b in rows))
+    await db.close()
 
 asyncio.run(main())

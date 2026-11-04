@@ -1,3 +1,5 @@
+from sqlalchemy import select, insert, update, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 import os
 import uuid
 from datetime import datetime, timezone
@@ -6,19 +8,19 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import ReturnDocument
 from starlette.concurrency import run_in_threadpool
 
 load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).parent / ".env.local", override=False)
 
 try:
     from backend.clerk_auth import require_user
+    from backend.database import Database, t as tables
 except ModuleNotFoundError:
     from clerk_auth import require_user
+    from database import Database, t as tables
 
-client = AsyncIOMotorClient(os.environ["MONGO_URL"])
-db = client[os.environ["DB_NAME"]]
+db = Database(os.environ["DATABASE_URL"])
 
 # Highest first; "pending" has no access until an admin assigns a role.
 ROLES = ["admin", "cost_controller", "project_manager", "store_manager", "foreman", "pending"]
@@ -28,7 +30,12 @@ RANK = {r: len(ROLES) - i for i, r in enumerate(ROLES)}
 ACTIVE = [r for r in ROLES if r != "pending"]
 
 ENV = "live" if os.environ.get("CLERK_PUBLISHABLE_KEY", "").startswith("pk_live_") else "preview"
-IN_ENV = {"env": {"$in": [ENV, None]}}
+IN_ENV = [or_(tables.users.c.env == ENV, tables.users.c.env.is_(None))]
+
+
+async def database_transaction():
+    async with db.transaction():
+        yield
 
 
 def now_iso() -> str:
@@ -60,17 +67,17 @@ def _clerk_profile(user_id: str) -> dict:
 
 async def current_member(user: dict = Depends(require_user)) -> dict:
     uid = user["user_id"]
-    member = await db.users.find_one({"user_id": uid}, {"_id": 0})
+    member = await db.one(select(tables.users).where(tables.users.c['user_id'] == uid))
     if member is None or not member.get("role"):
         prof = await run_in_threadpool(_clerk_profile, uid)
         role = "admin" if prof["is_admin"] else DEFAULT_ROLE
-        await db.users.update_one({"user_id": uid, "role": {"$in": [None, ""]}}, {"$set": {"role": role}})
-        member = await db.users.find_one_and_update(
-            {"user_id": uid},
-            {"$setOnInsert": {"user_id": uid, "role": role, "email": prof["email"], "name": prof["name"], "created_at": now_iso()}},
-            upsert=True, projection={"_id": 0}, return_document=ReturnDocument.AFTER)
+        await db.execute(update(tables.users).where(tables.users.c.user_id == uid,
+                         or_(tables.users.c.role.is_(None), tables.users.c.role == "")).values(role=role))
+        await db.execute(pg_insert(tables.users).values(user_id=uid, role=role, email=prof["email"],
+                         name=prof["name"], created_at=now_iso()).on_conflict_do_nothing(index_elements=["user_id"]))
+        member = await db.one(select(tables.users).where(tables.users.c.user_id == uid))
     if member.get("env") != ENV:
-        await db.users.update_one({"user_id": uid}, {"$set": {"env": ENV}})
+        await db.execute(update(tables.users).where(tables.users.c['user_id'] == uid).values({'env': ENV}))
     return {**member, "env": ENV, "role": effective_role(member["role"])}
 
 
@@ -83,8 +90,4 @@ def require_role(*roles: str):
 
 
 async def audit(entity: str, entity_id: str, action: str, member: dict, detail: dict | None = None):
-    await db.audit.insert_one({
-        "id": new_id(), "entity": entity, "entity_id": entity_id, "action": action,
-        "by": member.get("name") or member.get("email"), "by_id": member.get("user_id"),
-        "role": member.get("role"), "at": now_iso(), "detail": detail or {},
-    })
+    await db.execute(insert(tables.audit).values({'id': new_id(), 'entity': entity, 'entity_id': entity_id, 'action': action, 'by': member.get('name') or member.get('email'), 'by_id': member.get('user_id'), 'role': member.get('role'), 'at': now_iso(), 'detail': detail or {}}))

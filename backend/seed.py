@@ -1,12 +1,14 @@
 """Idempotent sample master data so the app works before the Oracle connection is configured."""
+from sqlalchemy import select, insert, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from datetime import date, timedelta
 import calendar
 
 try:
-    from backend.core import db, new_id, now_iso
+    from backend.core import db, tables, new_id, now_iso
     from backend.engine import DEFAULT_SETTINGS, validate
 except ModuleNotFoundError:
-    from core import db, new_id, now_iso
+    from core import db, tables, new_id, now_iso
     from engine import DEFAULT_SETTINGS, validate
 
 SRC = "sample"
@@ -51,8 +53,10 @@ BUDGETS = [("PRJ-1042", "Civil-WBS-3", "labor", None, 600, "hrs"), ("PRJ-1042", 
 
 
 async def next_ref(prefix: str) -> str:
-    c = await db.counters.find_one_and_update({"id": prefix}, {"$inc": {"n": 1}}, upsert=True, return_document=True)
-    return f"{prefix}-{c['n']:05d}"
+    statement = pg_insert(tables.counters).values(id=prefix, n=1)
+    n = await db.scalar(statement.on_conflict_do_update(index_elements=["id"],
+                        set_={"n": tables.counters.c.n + 1}).returning(tables.counters.c.n))
+    return f"{prefix}-{n:05d}"
 
 
 async def _sample_tx(t, proj, task, d, lines, status, by, mode="manual"):
@@ -61,26 +65,22 @@ async def _sample_tx(t, proj, task, d, lines, status, by, mode="manual"):
           "status": status, "submitted_by": by, "submitted_by_id": "sample", "submitted_at": now_iso(),
           "created_at": now_iso(), "approvals": [], "notes": "Sample data", "sample": True}
     await validate(tx)
-    await db.transactions.insert_one(tx)
+    await db.execute(insert(tables.transactions).values(tx))
 
 
 async def seed():
-    if await db.settings.count_documents({}) == 0:
-        await db.settings.insert_one(dict(DEFAULT_SETTINGS))
-    if await db.projects.count_documents({}) > 0:
+    if await db.scalar(select(func.count()).select_from(tables.settings)) == 0:
+        await db.execute(insert(tables.settings).values(dict(DEFAULT_SETTINGS)))
+    if await db.scalar(select(func.count()).select_from(tables.projects)) > 0:
         return
-    await db.projects.insert_many([{"id": new_id(), "number": n, "name": nm, "client": c, "source": SRC} for n, nm, c in PROJECTS])
-    await db.tasks.insert_many([{"id": new_id(), "project_number": p, "number": n, "name": nm, "source": SRC} for p, n, nm in TASKS])
-    await db.employees.insert_many([{"id": new_id(), "number": n, "name": nm, "grade": g, "trade": tr, "source": SRC} for n, nm, g, tr in EMPLOYEES])
-    await db.equipment.insert_many([{"id": new_id(), "number": n, "name": nm, "type": ty, "cls": c, "organization": "Plant & Equipment", "source": SRC}
-                                    for n, nm, ty, c in EQUIPMENT])
-    await db.items.insert_many([{"id": new_id(), "number": n, "description": d, "uom": u, "unit_cost": c, "category": cat, "source": SRC}
-                                for n, d, u, c, cat in ITEMS])
-    await db.hour_types.insert_many([{"id": new_id(), "resource_type": rt, "code": c, "name": nm, "requires_reason": rr, "expenditure_type": et, "order": i}
-                                     for i, (rt, c, nm, rr, et, _, _) in enumerate(HOUR_TYPES)])
-    await db.reason_codes.insert_many([{"id": new_id(), "code": c, "name": n, "resource_type": rt} for c, n, rt in REASONS])
-    await db.budgets.insert_many([{"id": new_id(), "project_number": p, "task_number": t, "resource_type": rt, "item_number": it, "qty": q, "uom": u, "source": SRC}
-                                  for p, t, rt, it, q, u in BUDGETS])
+    await db.insert_many(tables.projects, [{'id': new_id(), 'number': n, 'name': nm, 'client': c, 'source': SRC} for (n, nm, c) in PROJECTS])
+    await db.insert_many(tables.tasks, [{'id': new_id(), 'project_number': p, 'number': n, 'name': nm, 'source': SRC} for (p, n, nm) in TASKS])
+    await db.insert_many(tables.employees, [{'id': new_id(), 'number': n, 'name': nm, 'grade': g, 'trade': tr, 'source': SRC} for (n, nm, g, tr) in EMPLOYEES])
+    await db.insert_many(tables.equipment, [{'id': new_id(), 'number': n, 'name': nm, 'type': ty, 'cls': c, 'organization': 'Plant & Equipment', 'source': SRC} for (n, nm, ty, c) in EQUIPMENT])
+    await db.insert_many(tables.items, [{'id': new_id(), 'number': n, 'description': d, 'uom': u, 'unit_cost': c, 'category': cat, 'source': SRC} for (n, d, u, c, cat) in ITEMS])
+    await db.insert_many(tables.hour_types, [{'id': new_id(), 'resource_type': rt, 'code': c, 'name': nm, 'requires_reason': rr, 'expenditure_type': et, 'order': i} for (i, (rt, c, nm, rr, et, _, _)) in enumerate(HOUR_TYPES)])
+    await db.insert_many(tables.reason_codes, [{'id': new_id(), 'code': c, 'name': n, 'resource_type': rt} for (c, n, rt) in REASONS])
+    await db.insert_many(tables.budgets, [{'id': new_id(), 'project_number': p, 'task_number': t, 'resource_type': rt, 'item_number': it, 'qty': q, 'uom': u, 'source': SRC} for (p, t, rt, it, q, u) in BUDGETS])
     rcs = []
     for g, base in GRADES.items():
         for rt, c, _, _, _, mult, prem in HOUR_TYPES:
@@ -91,26 +91,14 @@ async def seed():
             rcs.append({"id": new_id(), "resource_type": "equipment", "key": cls, "hour_type": c, "base_rate": r, "multiplier": 1.0, "premium": 0})
     for r in rcs:
         r["effective_from"] = "2026-01-01"
-    await db.rate_cards.insert_many(rcs)
+    await db.insert_many(tables.rate_cards, rcs)
 
     today = date.today()
     first = today.replace(day=1)
     last = today.replace(day=calendar.monthrange(today.year, today.month)[1])
     crew_a, crew_b = new_id(), new_id()
-    await db.crews.insert_many([
-        {"id": crew_a, "name": "Crew-A (Civil)", "project_number": "PRJ-1042", "foreman": "S. Das"},
-        {"id": crew_b, "name": "Crew-B (MEP)", "project_number": "PRJ-1042", "foreman": "A. Patel"}])
-    await db.plans.insert_many([
-        {"id": new_id(), "kind": "crew", "status": "published", "project_number": "PRJ-1042", "task_number": "Civil-WBS-3", "crew_id": crew_a,
-         "shift": "Day Shift (06:00-14:00)", "start_date": first.isoformat(), "end_date": last.isoformat(), "created_by": "Sample data",
-         "created_at": now_iso(), "published_at": now_iso(),
-         "lines": [{"resource_type": "labor", "resource_number": "E-10021", "hours": {"REG": 8}},
-                   {"resource_type": "labor", "resource_number": "E-10022", "hours": {"REG": 8, "OT": 1}},
-                   {"resource_type": "labor", "resource_number": "E-10023", "hours": {"REG": 8}},
-                   {"resource_type": "equipment", "resource_number": "EXC-014", "hours": {"REG": 6.5, "IDLE": 1, "MAINT": 0.5}}]},
-        {"id": new_id(), "kind": "material", "status": "published", "project_number": "PRJ-1042", "task_number": "Civil-WBS-3",
-         "period_type": "monthly", "start_date": first.isoformat(), "end_date": last.isoformat(), "created_by": "Sample data", "created_at": now_iso(),
-         "published_at": now_iso(), "lines": [{"item_number": "CEM-OPC53", "planned_qty": 400}, {"item_number": "REBAR-GR60-25MM", "planned_qty": 15}]}])
+    await db.insert_many(tables.crews, [{'id': crew_a, 'name': 'Crew-A (Civil)', 'project_number': 'PRJ-1042', 'foreman': 'S. Das'}, {'id': crew_b, 'name': 'Crew-B (MEP)', 'project_number': 'PRJ-1042', 'foreman': 'A. Patel'}])
+    await db.insert_many(tables.plans, [{'id': new_id(), 'kind': 'crew', 'status': 'published', 'project_number': 'PRJ-1042', 'task_number': 'Civil-WBS-3', 'crew_id': crew_a, 'shift': 'Day Shift (06:00-14:00)', 'start_date': first.isoformat(), 'end_date': last.isoformat(), 'created_by': 'Sample data', 'created_at': now_iso(), 'published_at': now_iso(), 'lines': [{'resource_type': 'labor', 'resource_number': 'E-10021', 'hours': {'REG': 8}}, {'resource_type': 'labor', 'resource_number': 'E-10022', 'hours': {'REG': 8, 'OT': 1}}, {'resource_type': 'labor', 'resource_number': 'E-10023', 'hours': {'REG': 8}}, {'resource_type': 'equipment', 'resource_number': 'EXC-014', 'hours': {'REG': 6.5, 'IDLE': 1, 'MAINT': 0.5}}]}, {'id': new_id(), 'kind': 'material', 'status': 'published', 'project_number': 'PRJ-1042', 'task_number': 'Civil-WBS-3', 'period_type': 'monthly', 'start_date': first.isoformat(), 'end_date': last.isoformat(), 'created_by': 'Sample data', 'created_at': now_iso(), 'published_at': now_iso(), 'lines': [{'item_number': 'CEM-OPC53', 'planned_qty': 400}, {'item_number': 'REBAR-GR60-25MM', 'planned_qty': 15}]}])
 
     past = (today - timedelta(days=20)).isoformat()
     by = "Sample data"

@@ -87,11 +87,13 @@ class TestLabor:
         assert {ln["resource_number"] for ln in af["lines"]} == {"E-10021", "E-10022", "E-10023"}
 
     def test_preview_breach_and_absent(self, c, crew_a):
-        af = c["foreman"].get("/plans/autofill", params={"type": "labor", "project_number": "PRJ-1042", "task_number": "Civil-WBS-3",
-                                                       "crew_id": crew_a, "date": TODAY}).json()["lines"]
+        loaded = c["foreman"].get("/plans/autofill", params={"type": "labor", "project_number": "PRJ-1042", "task_number": "Civil-WBS-3",
+                                                           "crew_id": crew_a, "date": TODAY}).json()
+        af = loaded["lines"]
         af[0]["hours"] = 10  # 8 -> 10 = +25%
         af[1]["present"] = False
-        d = c["foreman"].post("/transactions/preview", tx("labor", "PRJ-1042", "Civil-WBS-3", af, mode="plan", crew_id=crew_a)).json()
+        d = c["foreman"].post("/transactions/preview", tx("labor", "PRJ-1042", "Civil-WBS-3", af, mode="plan", crew_id=crew_a,
+                                                       plan_id=loaded["plan"]["id"])).json()
         assert d["lines"][0]["tolerance_status"] == "breach"
         assert d["lines"][1]["tolerance_status"] == "absent" and d["lines"][1]["cost"] == 0
         assert d["validation"]["tolerance"]["breach"] is True
@@ -183,7 +185,7 @@ class TestApprovals:
         r = c["foreman"].put(f"/transactions/{tid}", tx("labor", "PRJ-2088", "Piping-WBS-4", lines, "submit"))
         assert r.status_code == 200 and r.json()["status"] == "pending_step1"
         assert any(a["step"] == "resubmit" for a in r.json()["approvals"])
-        assert "rejection_reason" not in r.json()
+        assert r.json().get("rejection_reason") is None
 
     def test_cannot_approve_own(self, c):
         lines = [{"resource_number": "E-10029", "hour_type": "REG", "hours": 2}]
@@ -222,14 +224,17 @@ class TestSetup:
         r = c["foreman"].post("/transactions", tx("labor", "PRJ-1042", "MEP-WBS-7", over, "submit"))  # MEP labor already >100%
         assert r.status_code == 422 and "Budget" in r.json()["detail"]
         self._put(c, s, tolerance_behavior="stop")
-        af = c["foreman"].get("/plans/autofill", params={"type": "labor", "project_number": "PRJ-1042", "task_number": "Struct-WBS-2",
-                                                       "crew_id": crew_b, "date": FUT}).json()["lines"]
+        loaded = c["foreman"].get("/plans/autofill", params={"type": "labor", "project_number": "PRJ-1042", "task_number": "Struct-WBS-2",
+                                                           "crew_id": crew_b, "date": FUT}).json()
+        af = loaded["lines"]
         af[0]["hours"] = 12
-        r = c["foreman"].post("/transactions", tx("labor", "PRJ-1042", "Struct-WBS-2", af, "submit", date=FUT, crew_id=crew_b, mode="plan"))
+        r = c["foreman"].post("/transactions", tx("labor", "PRJ-1042", "Struct-WBS-2", af, "submit", date=FUT, crew_id=crew_b, mode="plan",
+                                               plan_id=loaded["plan"]["id"]))
         assert r.status_code == 422 and "tolerance" in r.json()["detail"].lower()
         self._put(c, s, auto_approval="full")
         af[0]["hours"] = af[0]["planned_hours"]
-        r = c["foreman"].post("/transactions", tx("labor", "PRJ-1042", "Struct-WBS-2", af, "submit", date=FUT, crew_id=crew_b, mode="plan"))
+        r = c["foreman"].post("/transactions", tx("labor", "PRJ-1042", "Struct-WBS-2", af, "submit", date=FUT, crew_id=crew_b, mode="plan",
+                                               plan_id=loaded["plan"]["id"]))
         assert r.status_code == 200 and r.json()["status"] == "approved"
 
 
