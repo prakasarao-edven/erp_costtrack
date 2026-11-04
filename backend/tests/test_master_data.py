@@ -13,9 +13,11 @@ CREATED = []  # (entity, id)
 
 @pytest.fixture(scope="module", autouse=True)
 def cleanup(c):
+    # restore the modes that were set before the run (never force hybrid: the owner may have chosen ERP mode)
+    orig = {e["entity"]: e["mode"] for e in c["admin"].get("/md/summary").json()["entities"]}
     yield
     a = c["admin"]
-    a.put("/md/source-modes", {"modes": {e: "hybrid" for e in ["projects", "tasks", "employees", "equipment", "items", "stores", "lookups"]}})
+    a.put("/md/source-modes", {"modes": orig})
     for ent, rid in reversed(CREATED):
         if ent in ("rate_cards", "transactions"):
             mdb[ent].delete_one({"id": rid})
@@ -36,6 +38,7 @@ def test_summary(c):
 
 def test_source_mode_erp_blocks_create(c):
     a = c["admin"]
+    orig = {e["entity"]: e["mode"] for e in a.get("/md/summary").json()["entities"]}["stores"]
     try:
         r = a.put("/md/source-modes", {"modes": {"stores": "erp"}})
         assert r.status_code == 200 and r.json()["stores"] == "erp"
@@ -44,7 +47,7 @@ def test_source_mode_erp_blocks_create(c):
         r = a.post("/md/stores/bulk", {"rows": [{"code": f"TEST-ST{SUF}", "name": "x", "store_type": "Site Store"}]})
         assert r.json()["counts"]["error"] == 1
     finally:
-        assert a.put("/md/source-modes", {"modes": {"stores": "hybrid"}}).json()["stores"] == "hybrid"
+        assert a.put("/md/source-modes", {"modes": {"stores": orig}}).json()["stores"] == orig
 
 
 def test_source_mode_non_admin_forbidden(c):
@@ -107,6 +110,8 @@ def test_delete_rules(c):
 
 def test_inactive_employee_hidden_and_rejected(c):
     a = c["admin"]
+    if {e["entity"]: e["mode"] for e in a.get("/md/summary").json()["entities"]}["employees"] == "erp":
+        pytest.skip("employees source mode is ERP (owner setting) - local create blocked")
     r = a.post("/md/employees", {"number": f"TEST-E{SUF}", "name": "TEST emp", "grade": "Skilled"})
     assert r.status_code == 200, r.text
     eid = r.json()["id"]
@@ -157,9 +162,10 @@ def test_bulk_erp_rows(c):
 
 
 # --- labor bonuses, RES override, foreman hiding
-def test_foreman_bonus_amount_hidden(c):
+def test_foreman_bonus_amount_visible(c):
+    # iteration 4: bonus amounts are sent to foreman for pre-fill (labor rates are still redacted)
     br = c["foreman"].get("/master").json()["bonus_rates"]
-    assert br and all("amount" not in b for b in br)
+    assert br and all("amount" in b for b in br)
 
 
 def test_bonus_in_totals_and_cost_lines(c):

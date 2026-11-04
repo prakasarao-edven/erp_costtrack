@@ -11,6 +11,7 @@ export function useEntry(type) {
   const [lines, setLines] = useState([]);
   const [bonuses, setBonuses] = useState([]);
   const [preview, setPreview] = useState(null);
+  const [previewError, setPreviewError] = useState(null);
   const [editing, setEditing] = useState(null);
   const [recent, setRecent] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -35,8 +36,10 @@ export function useEntry(type) {
       try {
         const { data } = await api.post("/transactions/preview", body("draft"));
         setPreview(data);
+        setPreviewError(null);
       } catch (e) {
         setPreview(null);
+        setPreviewError(errMsg(e));
       }
     }, 350);
     return () => clearTimeout(timer.current);
@@ -76,5 +79,5 @@ export function useEntry(type) {
   const setLine = (i, patch) => setLines((ls) => ls.map((l, j) => (j === i ? { ...l, ...patch } : l)));
   const removeLine = (i) => setLines((ls) => ls.filter((_, j) => j !== i));
 
-  return { api, header, setHeader, mode, setMode, planId, setPlanId, lines, setLines, setLine, removeLine, bonuses, setBonuses, preview, editing, recent, busy, save, edit, reset };
+  return { api, header, setHeader, mode, setMode, planId, setPlanId, lines, setLines, setLine, removeLine, bonuses, setBonuses, preview, previewError, editing, recent, busy, save, edit, reset };
 }

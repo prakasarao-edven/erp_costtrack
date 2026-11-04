@@ -54,7 +54,7 @@ export default function UsageEntry({ type }) {
 
   useEffect(() => {
     e.setLines(toLines(rows, codes, reasonCodes));
-    e.setBonuses(rows.filter((r) => r.bonus_type && Number(r.bonus_amount) > 0).map((r) => ({ resource_number: r.resource_number, bonus_type: r.bonus_type, amount: Number(r.bonus_amount) })));
+    e.setBonuses(rows.filter((r) => r.present && r.resource_number && r.bonus_type && Number(r.bonus_amount) > 0).map((r) => ({ resource_number: r.resource_number, bonus_type: r.bonus_type, amount: Number(r.bonus_amount) })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows]);
   useEffect(() => {
@@ -168,9 +168,10 @@ export default function UsageEntry({ type }) {
       </div>
       <DataList id={`${type}-res-list`} options={resOptions} />
       <ValidationPanel tx={e.preview} />
+      {e.previewError && e.lines.length > 0 && <div className="mt-3 rounded-md border border-rose-500/30 bg-rose-500/5 px-4 py-2 text-sm text-rose-300" data-testid="preview-error">{e.previewError}</div>}
       <div className="mt-6 flex flex-wrap items-center gap-3">
         <Button variant="outline" disabled={e.busy || locked || !e.lines.length} onClick={() => e.save("draft")} data-testid={`${type}-save-draft-btn`}>Save draft</Button>
-        <Button disabled={e.busy || locked || !e.lines.length || e.preview?.validation?.blocked} onClick={async () => { if (await e.save("submit")) setRows([]); }} data-testid={`${type}-submit-btn`}>Submit for approval</Button>
+        <Button disabled={e.busy || locked || !e.lines.length || !!e.previewError || e.preview?.validation?.blocked} onClick={async () => { if (await e.save("submit")) setRows([]); }} data-testid={`${type}-submit-btn`}>Submit for approval</Button>
         {e.preview?.validation?.blocked && <span className="text-xs text-rose-400">Resolve the issues above before submitting.</span>}
         {e.preview && <span className="num ml-auto text-sm text-muted-foreground">{num(e.preview.totals.qty, 2)} hrs{showRates && ` · ${usd(e.preview.totals.cost)}`}{e.preview.totals.bonus ? ` (incl. bonus ${usd(e.preview.totals.bonus)})` : ""}</span>}
       </div>
