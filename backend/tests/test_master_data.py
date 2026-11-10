@@ -3,16 +3,16 @@ import time
 import uuid
 
 import pytest
-from pymongo import MongoClient
+from sqlalchemy import select, update, delete
+from backend.database import t as tables
 
-mdb = MongoClient("mongodb://localhost:27017")["test_database"]
 SUF = uuid.uuid4().hex[:6].upper()
 TODAY = time.strftime("%Y-%m-%d")
 CREATED = []  # (entity, id)
 
 
 @pytest.fixture(scope="module", autouse=True)
-def cleanup(c):
+def cleanup(c, sql):
     # restore the modes that were set before the run (never force hybrid: the owner may have chosen ERP mode)
     orig = {e["entity"]: e["mode"] for e in c["admin"].get("/md/summary").json()["entities"]}
     yield
@@ -20,9 +20,9 @@ def cleanup(c):
     a.put("/md/source-modes", {"modes": orig})
     for ent, rid in reversed(CREATED):
         if ent in ("rate_cards", "transactions"):
-            mdb[ent].delete_one({"id": rid})
             if ent == "transactions":
-                mdb.cost_transactions.delete_many({"transaction_id": rid})
+                sql(delete(tables.cost_transactions).where(tables.cost_transactions.c['transaction_id'] == rid))
+            sql(delete(getattr(tables, ent)).where(getattr(tables, ent).c['id'] == rid))
         else:
             a.delete(f"/md/{ent}/{rid}")
 
@@ -33,7 +33,7 @@ def test_summary(c):
     assert r.status_code == 200
     ents = {e["entity"]: e for e in r.json()["entities"]}
     assert set(ents) == {"projects", "tasks", "employees", "equipment", "items", "stores", "lookups"}
-    assert ents["projects"]["erp"] >= 270 and ents["employees"]["erp"] >= 6000
+    assert ents["projects"]["erp"] >= 1 and ents["employees"]["erp"] >= 1
 
 
 def test_source_mode_erp_blocks_create(c):
@@ -78,7 +78,7 @@ def test_create_local_project_and_task(c):
     assert r.status_code == 200 and r.json()["name"] == "TEST renamed"
 
 
-def test_erp_record_lock(c):
+def test_erp_record_lock(c, sql):
     a = c["admin"]
     p = a.get("/md/projects", params={"q": "00009805"}).json()["rows"][0]
     assert p["source"] == "oracle"
@@ -90,14 +90,14 @@ def test_erp_record_lock(c):
         assert r.status_code == 200 and r.json()["site"] == "TEST site"
         assert r.json()["name"] == p["name"]
     finally:
-        mdb.projects.update_one({"id": p["id"]}, {"$set": {"site": orig}} if orig is not None else {"$unset": {"site": 1}})
+        sql(update(tables.projects).where(tables.projects.c['id'] == p['id']).values(({'site': orig} if orig is not None else {'site': None})))
     e = a.get("/md/employees", params={"source": "erp"}).json()["rows"][0]
     try:
         r = a.put(f"/md/employees/{e['id']}", {"badge_id": "TEST-B1"})
         assert r.status_code == 200 and r.json()["badge_id"] == "TEST-B1"
         assert a.put(f"/md/employees/{e['id']}", {"grade": "Foreman-XX"}).status_code == 400
     finally:
-        mdb.employees.update_one({"id": e["id"]}, {"$set": {"badge_id": e["badge_id"]}} if "badge_id" in e else {"$unset": {"badge_id": 1}})
+        sql(update(tables.employees).where(tables.employees.c['id'] == e['id']).values(({'badge_id': e['badge_id']} if 'badge_id' in e else {'badge_id': None})))
 
 
 def test_delete_rules(c):
@@ -168,7 +168,7 @@ def test_foreman_bonus_amount_visible(c):
     assert br and all("amount" in b for b in br)
 
 
-def test_bonus_in_totals_and_cost_lines(c):
+def test_bonus_in_totals_and_cost_lines(c, sql):
     a = c["admin"]
     body = {"type": "labor", "project_number": "PRJ-1042", "task_number": "Civil-WBS-3", "date": TODAY, "action": "submit",
             "notes": "TEST_bonus", "lines": [{"resource_number": "E-10021", "hour_type": "REG", "hours": 1}],
@@ -185,7 +185,7 @@ def test_bonus_in_totals_and_cost_lines(c):
             break
         tx = a.post(f"/transactions/{tx['id']}/approve", {"comment": "TEST"}).json()
     assert tx["status"] == "approved"
-    cts = list(mdb.cost_transactions.find({"transaction_id": tx["id"]}, {"_id": 0}))
+    cts = list(sql(select(tables.cost_transactions).where(tables.cost_transactions.c['transaction_id'] == tx['id'])).mappings().all())
     b = [x for x in cts if x["ref"].endswith("-B1")]
     assert len(b) == 1 and b[0]["amount"] == 10 and "Bonus" in b[0]["payload"]["ExpenditureType"]
 

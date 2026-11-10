@@ -1,8 +1,9 @@
 """Costing + validation + approval routing engine shared by labor, equipment and material."""
+from sqlalchemy import select, or_
 try:
-    from backend.core import db
+    from backend.core import db, tables
 except ModuleNotFoundError:
-    from core import db
+    from core import db, tables
 
 DEFAULT_SETTINGS = {
     "id": "global",
@@ -29,7 +30,7 @@ PENDING = ["pending_step1", "pending_special", "pending_step2"]
 
 async def plan_rows(plan: dict, rtype: str) -> list[dict]:
     """Expected timesheet rows (one per resource x hour type) from a published crew plan."""
-    order = [h["code"] for h in await db.hour_types.find({"resource_type": rtype}, {"_id": 0}).sort("order", 1).to_list(50)]
+    order = [h["code"] for h in await db.all(select(tables.hour_types).where(tables.hour_types.c['resource_type'] == rtype).order_by(tables.hour_types.c['order'].asc()).limit(50))]
     rows = []
     for ln in plan["lines"]:
         if ln.get("resource_type") != rtype:
@@ -48,9 +49,7 @@ async def _apply_plan(tx: dict) -> bool:
         ln["plan_line"], ln["planned_hours"] = False, None
     if tx["type"] == "material" or tx.get("mode") != "plan" or not tx.get("plan_id"):
         return False
-    plan = await db.plans.find_one({"id": tx["plan_id"], "kind": "crew", "status": "published", "project_number": tx["project_number"],
-                                    "task_number": tx["task_number"], "crew_id": tx.get("crew_id"),
-                                    "start_date": {"$lte": tx["date"]}, "end_date": {"$gte": tx["date"]}}, {"_id": 0})
+    plan = await db.one(select(tables.plans).where(tables.plans.c['id'] == tx['plan_id'], tables.plans.c['kind'] == 'crew', tables.plans.c['status'] == 'published', tables.plans.c['project_number'] == tx['project_number'], tables.plans.c['task_number'] == tx['task_number'], tables.plans.c['crew_id'] == tx.get('crew_id'), tables.plans.c['start_date'] <= tx['date'], tables.plans.c['end_date'] >= tx['date']))
     if not plan:
         return False
     expected = {(r["resource_number"], r["hour_type"]): r["planned_hours"] for r in await plan_rows(plan, tx["type"])}
@@ -65,7 +64,7 @@ async def _apply_plan(tx: dict) -> bool:
 
 
 async def get_settings() -> dict:
-    s = await db.settings.find_one({"id": "global"}, {"_id": 0})
+    s = await db.one(select(tables.settings).where(tables.settings.c['id'] == 'global'))
     return s or DEFAULT_SETTINGS
 
 
@@ -82,14 +81,14 @@ async def price(tx: dict) -> dict:
     tc = cost = 0.0
     if t in ("labor", "equipment"):
         rmap = {}
-        for r in await db.rate_cards.find({"resource_type": t, "effective_from": {"$lte": tx["date"]}}, {"_id": 0}).to_list(5000):
+        for r in await db.all(select(tables.rate_cards).where(tables.rate_cards.c['resource_type'] == t, tables.rate_cards.c['effective_from'] <= tx['date']).limit(5000)):
             if r.get("effective_to") and r["effective_to"] < tx["date"]:
                 continue
             k = (r["key"], r["hour_type"])
             if k not in rmap or r["effective_from"] > rmap[k]["effective_from"]:
                 rmap[k] = r
-        coll = db.employees if t == "labor" else db.equipment
-        res = {r["number"]: r for r in await coll.find({}, {"_id": 0}).to_list(20000)}
+        coll = tables.employees if t == "labor" else tables.equipment
+        res = {r["number"]: r for r in await db.all(select(coll).limit(20000))}
         for ln in tx["lines"]:
             r = res.get(ln["resource_number"], {})
             ln["resource_name"] = r.get("name", ln.get("resource_name", ln["resource_number"]))
@@ -105,7 +104,7 @@ async def price(tx: dict) -> dict:
         bonus = round(sum(float(b.get("amount") or 0) for b in tx.get("bonuses", [])), 2)
         tx["totals"] = {"qty": round(tc, 2), "uom": "hrs", "cost": round(cost + bonus, 2), "bonus": bonus}
     else:
-        items = {i["number"]: i for i in await db.items.find({}, {"_id": 0}).to_list(10000)}
+        items = {i["number"]: i for i in await db.all(select(tables.items).limit(10000))}
         uoms = set()
         for ln in tx["lines"]:
             it = items.get(ln["item_number"], {})
@@ -126,10 +125,11 @@ def _budget_status(pct: float, warn: float) -> str:
     return "exceeded" if pct > 100 else "warning" if pct >= warn else "ok"
 
 
-async def _active_txs(tx: dict, extra: dict | None = None) -> list[dict]:
-    q = {"type": tx["type"], "project_number": tx["project_number"], "task_number": tx["task_number"],
-         "status": {"$nin": ["draft", "rejected"]}, "id": {"$ne": tx.get("id")}, **(extra or {})}
-    return await db.transactions.find(q, {"_id": 0, "lines": 1, "totals": 1}).to_list(10000)
+async def _active_txs(tx: dict, extra=()) -> list[dict]:
+    q = [tables.transactions.c.type == tx["type"], tables.transactions.c.project_number == tx["project_number"],
+         tables.transactions.c.task_number == tx["task_number"], tables.transactions.c.status.not_in(["draft", "rejected"]),
+         tables.transactions.c.id.is_distinct_from(tx.get("id")), *extra]
+    return await db.all(select(tables.transactions).where(*q).limit(10000))
 
 
 async def _budget_check(tx: dict, s: dict) -> dict:
@@ -137,7 +137,7 @@ async def _budget_check(tx: dict, s: dict) -> dict:
     checks = []
     prior_docs = await _active_txs(tx)
     if t in ("labor", "equipment"):
-        b = await db.budgets.find_one({"project_number": tx["project_number"], "task_number": tx["task_number"], "resource_type": t}, {"_id": 0})
+        b = await db.one(select(tables.budgets).where(tables.budgets.c['project_number'] == tx['project_number'], tables.budgets.c['task_number'] == tx['task_number'], tables.budgets.c['resource_type'] == t))
         prior = sum(d["totals"]["qty"] for d in prior_docs if d.get("totals"))
         if b:
             after = prior + tx["totals"]["qty"]
@@ -146,8 +146,7 @@ async def _budget_check(tx: dict, s: dict) -> dict:
                            "after": round(after, 2), "pct": round(pct, 1), "uom": "hrs", "status": _budget_status(pct, warn)})
     else:
         for item in {ln["item_number"] for ln in tx["lines"]}:
-            b = await db.budgets.find_one({"project_number": tx["project_number"], "task_number": tx["task_number"],
-                                           "resource_type": "material", "item_number": item}, {"_id": 0})
+            b = await db.one(select(tables.budgets).where(tables.budgets.c['project_number'] == tx['project_number'], tables.budgets.c['task_number'] == tx['task_number'], tables.budgets.c['resource_type'] == 'material', tables.budgets.c['item_number'] == item))
             if not b:
                 continue
             prior = sum(ln.get("qty_consumed", 0) for d in prior_docs for ln in d["lines"] if ln["item_number"] == item)
@@ -179,9 +178,9 @@ async def _tolerance_check(tx: dict, s: dict) -> dict:
                 ln["tolerance_status"] = "matches" if ln["hours"] == p else "within" if abs(dev) <= tol else "breach"
                 breach = breach or ln["tolerance_status"] == "breach"
     else:
-        plan = await db.plans.find_one({"kind": "material", "status": "published", "project_number": tx["project_number"],
-                                        "task_number": tx["task_number"], "start_date": {"$lte": tx["date"]}, "end_date": {"$gte": tx["date"]}}, {"_id": 0})
-        prior_docs = await _active_txs(tx, {"date": {"$gte": plan["start_date"], "$lte": plan["end_date"]}}) if plan else []
+        plan = await db.one(select(tables.plans).where(tables.plans.c['kind'] == 'material', tables.plans.c['status'] == 'published', tables.plans.c['project_number'] == tx['project_number'], tables.plans.c['task_number'] == tx['task_number'], tables.plans.c['start_date'] <= tx['date'], tables.plans.c['end_date'] >= tx['date']))
+        prior_docs = await _active_txs(tx, [tables.transactions.c.date >= plan["start_date"],
+                                          tables.transactions.c.date <= plan["end_date"]]) if plan else []
         planned = {ln["item_number"]: ln["planned_qty"] for ln in (plan or {}).get("lines", []) if ln.get("planned_qty")}
         for ln in tx["lines"]:
             p = planned.get(ln["item_number"])
@@ -209,7 +208,7 @@ async def validate(tx: dict) -> dict:
     tolerance = await _tolerance_check(tx, s)
     errors, reasons = [], []
     if t == "equipment":
-        rr = {h["code"] for h in await db.hour_types.find({"resource_type": "equipment", "requires_reason": True}, {"_id": 0}).to_list(50)}
+        rr = {h["code"] for h in await db.all(select(tables.hour_types).where(tables.hour_types.c['resource_type'] == 'equipment', tables.hour_types.c['requires_reason'].is_(True)).limit(50))}
         for ln in tx["lines"]:
             if ln["hour_type"] in rr and ln["hours"] > 0 and not ln.get("reason_code"):
                 errors.append(f"{ln['resource_number']} {ln['hour_type']}: reason code is required")
@@ -232,7 +231,7 @@ async def validate(tx: dict) -> dict:
             per[ln["resource_number"]] = per.get(ln["resource_number"], 0) + ln["hours"]
         errors += [f"{r}: {h}h in one day exceeds 24h" for r, h in per.items() if h > 24]
     if t == "labor":
-        brs = {b["bonus_type"]: b for b in await db.bonus_rates.find({}, {"_id": 0}).to_list(100)}
+        brs = {b["bonus_type"]: b for b in await db.all(select(tables.bonus_rates).limit(100))}
         for b in tx.get("bonuses", []):
             br = brs.get(b["bonus_type"])
             hrs = sum(ln["hours"] for ln in tx["lines"] if ln["resource_number"] == b["resource_number"])
@@ -270,8 +269,8 @@ def next_status(tx: dict) -> str:
 async def build_cost_transactions(tx: dict, s: dict) -> list[dict]:
     o = s["oracle"]
     t = tx["type"]
-    hts = {(h["resource_type"], h["code"]): h for h in await db.hour_types.find({}, {"_id": 0}).to_list(100)}
-    eq = {e["number"]: e for e in await db.equipment.find({}, {"_id": 0}).to_list(10000)}
+    hts = {(h["resource_type"], h["code"]): h for h in await db.all(select(tables.hour_types).limit(100))}
+    eq = {e["number"]: e for e in await db.all(select(tables.equipment).limit(10000))}
     out = []
     for i, ln in enumerate(tx["lines"]):
         ref = f"CB-{tx['ref']}-{i + 1}"

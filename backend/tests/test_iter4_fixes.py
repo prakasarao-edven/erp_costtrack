@@ -3,9 +3,9 @@ import time
 import uuid
 
 import pytest
-from pymongo import MongoClient
+from sqlalchemy import select, update, delete
+from backend.database import t as tables
 
-mdb = MongoClient("mongodb://localhost:27017")["test_database"]
 SUF = uuid.uuid4().hex[:6].upper()
 TODAY = time.strftime("%Y-%m-%d")
 CREATED = []  # (entity, id)
@@ -21,15 +21,15 @@ def body(bonuses=None, lines=None, **kw):
 
 
 @pytest.fixture(scope="module", autouse=True)
-def cleanup(c):
+def cleanup(c, sql):
     yield
     a = c["admin"]
     for ent, rid in reversed(CREATED):
         if ent == "transactions":
-            mdb.transactions.delete_one({"id": rid})
-            mdb.cost_transactions.delete_many({"transaction_id": rid})
+            sql(delete(tables.cost_transactions).where(tables.cost_transactions.c['transaction_id'] == rid))
+            sql(delete(tables.transactions).where(tables.transactions.c['id'] == rid))
         elif ent == "plans":
-            mdb.plans.delete_one({"id": rid})
+            sql(delete(tables.plans).where(tables.plans.c['id'] == rid))
         else:
             a.delete(f"/md/{ent}/{rid}")
 
@@ -52,14 +52,14 @@ class TestBonusValidation:
             r = c["admin"].post(ep, body([{"resource_number": "E-10021", "bonus_type": "Bogus", "amount": 5}]))
             assert r.status_code == 400 and "Unknown bonus type" in r.text, r.text
 
-    def test_bonus_inactive_type(self, c):
+    def test_bonus_inactive_type(self, c, sql):
         a = c["admin"]
         r = a.post("/md/lookups", {"type": "BONUS_TYPE", "code": f"TESTB{SUF}", "meaning": f"TEST Bonus {SUF}", "order": "99"})
         assert r.status_code == 200, r.text
         lid = r.json()["id"]
         CREATED.append(("lookups", lid))
         assert r.json()["order"] == 99 and isinstance(r.json()["order"], (int, float))
-        assert isinstance(mdb.lookups.find_one({"id": lid})["order"], (int, float))
+        assert isinstance(sql(select(tables.lookups).where(tables.lookups.c['id'] == lid)).mappings().first()["order"], (int, float))
         b = body([{"resource_number": "E-10021", "bonus_type": f"TEST Bonus {SUF}", "amount": 1}])
         assert a.post("/transactions/preview", b).status_code == 200
         assert a.post(f"/md/lookups/{lid}/status", {"status": "Inactive"}).status_code == 200
@@ -94,7 +94,7 @@ class TestBonusValidation:
 
 # --- foreman redaction
 class TestForemanRedaction:
-    def test_preview_create_list_get(self, c):
+    def test_preview_create_list_get(self, c, sql):
         f = c["foreman"]
         b = body([{"resource_number": "E-10021", "bonus_type": "Safety", "amount": 10}])
         pv = f.post("/transactions/preview", b)
@@ -114,7 +114,7 @@ class TestForemanRedaction:
         g = f.get(f"/transactions/{tx['id']}").json()
         assert "cost" not in g["totals"] and all("rate" not in l for l in g["lines"]) and g["cost_transactions"] == []
         # stored doc still has cost; admin sees it
-        assert mdb.transactions.find_one({"id": tx["id"]})["totals"]["cost"] > 0
+        assert sql(select(tables.transactions).where(tables.transactions.c['id'] == tx['id'])).mappings().first()["totals"]["cost"] > 0
         ga = c["admin"].get(f"/transactions/{tx['id']}").json()
         assert ga["totals"]["cost"] > 0 and "rate" in ga["lines"][0]
 
@@ -166,13 +166,13 @@ class TestMasterDataRules:
         assert a.delete(f"/md/employees/{eid}").status_code == 200
         CREATED.remove(("employees", eid))
 
-    def test_status_on_erp_record_400(self, c):
+    def test_status_on_erp_record_400(self, c, sql):
         a = c["admin"]
         p = a.get("/md/projects", params={"source": "erp"}).json()["rows"][0]
-        before = mdb.projects.find_one({"id": p["id"]}).get("status")
+        before = sql(select(tables.projects).where(tables.projects.c['id'] == p['id'])).mappings().first().get("status")
         r = a.post(f"/md/projects/{p['id']}/status", {"status": "Inactive"})
         assert r.status_code == 400, r.text
-        assert mdb.projects.find_one({"id": p["id"]}).get("status") == before
+        assert sql(select(tables.projects).where(tables.projects.c['id'] == p['id'])).mappings().first().get("status") == before
 
 
 # --- sample plans cover current month

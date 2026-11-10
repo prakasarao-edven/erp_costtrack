@@ -1,24 +1,26 @@
-import asyncio
+from sqlalchemy import select, insert, update, delete, func, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 import logging
 import os
 
-from pymongo import UpdateOne
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 
 try:
     from backend.clerk_auth import clerk_router
-    from backend.core import ACTIVE, ENV, IN_ENV, RANK, ROLES, audit, client, current_member, db, effective_role, new_id, now_iso, require_role
+    from backend.core import ACTIVE, ENV, IN_ENV, RANK, ROLES, audit, current_member, database_transaction, db, tables, effective_role, new_id, now_iso, require_role
     from backend.engine import PENDING, build_cost_transactions, get_settings, next_status, plan_rows, route_on_submit, step_roles, validate
     from backend.erp import get_adapter
     from backend.masterdata import md, source_modes
     from backend.seed import next_ref, seed
 except ModuleNotFoundError:
     from clerk_auth import clerk_router
-    from core import ACTIVE, ENV, IN_ENV, RANK, ROLES, audit, client, current_member, db, effective_role, new_id, now_iso, require_role
+    from core import ACTIVE, ENV, IN_ENV, RANK, ROLES, audit, current_member, database_transaction, db, tables, effective_role, new_id, now_iso, require_role
     from engine import PENDING, build_cost_transactions, get_settings, next_status, plan_rows, route_on_submit, step_roles, validate
     from erp import get_adapter
     from masterdata import md, source_modes
@@ -29,13 +31,17 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 app = FastAPI(title="CostBridge")
-api = APIRouter(prefix="/api")
+api = APIRouter(prefix="/api", dependencies=[Depends(database_transaction)])
+
+
+@app.exception_handler(IntegrityError)
+async def data_conflict(request, exc):
+    return JSONResponse(status_code=409, content={"detail": "This change conflicts with an existing or referenced record."})
 
 PLANNERS = ["admin", "project_manager", "foreman"]
 CAPTURE = {"labor": PLANNERS, "equipment": PLANNERS, "material": ["admin", "store_manager", "foreman"]}
 APPROVERS = ["admin", "project_manager", "cost_controller"]
 ERP_ROLES = ["admin", "cost_controller"]
-P = {"_id": 0}
 
 
 def all_active():
@@ -44,15 +50,17 @@ def all_active():
 
 @app.on_event("startup")
 async def startup():
-    await seed()
-    await db.erp_batches.update_many({"status": "running"}, {"$set": {"status": "error", "error": "Interrupted by server restart"}})
-    await db.transactions.create_index("id", unique=True)
-    await db.users.create_index("user_id", unique=True)
+    await db.initialize()
+    async with db.transaction():
+        await db.scalar(select(func.pg_advisory_xact_lock(714237)))
+        await seed()
+        await db.execute(update(tables.erp_batches).where(tables.erp_batches.c.status == 'running')
+                         .values(status='error', error='Interrupted by server restart'))
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    client.close()
+    await db.close()
 
 
 # ---------- Users ----------
@@ -63,7 +71,7 @@ async def me(member: dict = Depends(current_member)):
 
 @api.get("/users")
 async def list_users(admin: dict = Depends(require_role("admin"))):
-    people = await db.users.find(IN_ENV, P).to_list(1000)
+    people = await db.all(select(tables.users).where(*IN_ENV).limit(1000))
     return {"roles": [r for r in ROLES if RANK[r] <= RANK[admin["role"]]],
             "users": [{**p, "role": effective_role(p.get("role"))} for p in people]}
 
@@ -76,13 +84,13 @@ class RoleIn(BaseModel):
 async def set_role(user_id: str, body: RoleIn, admin: dict = Depends(require_role("admin"))):
     if body.role not in ROLES or RANK[body.role] > RANK[admin["role"]]:
         raise HTTPException(403, "Not allowed")
-    target = await db.users.find_one({"user_id": user_id, **IN_ENV}, P)
+    target = await db.one(select(tables.users).where(tables.users.c['user_id'] == user_id, *IN_ENV))
     if target is None:
         raise HTTPException(404, "Not found")
     if (effective_role(target.get("role")) == "admin" and body.role != "admin"
-            and await db.users.count_documents({"role": "admin", **IN_ENV}) <= 1):
+            and await db.scalar(select(func.count()).select_from(tables.users).where(tables.users.c['role'] == 'admin', *IN_ENV)) <= 1):
         raise HTTPException(409, "Keep at least one admin")
-    await db.users.update_one({"user_id": user_id}, {"$set": {"role": body.role}})
+    await db.execute(update(tables.users).where(tables.users.c['user_id'] == user_id).values({'role': body.role}))
     await audit("user", user_id, f"role set to {body.role}", admin)
     return {"user_id": user_id, "role": body.role}
 
@@ -91,15 +99,16 @@ async def set_role(user_id: str, body: RoleIn, admin: dict = Depends(require_rol
 @api.get("/master")
 async def master(member: dict = Depends(all_active())):
     out = {}
-    live = {"status": {"$nin": ["Inactive", "Closed", "Disposed"]}}
     for name in ["projects", "tasks", "employees", "equipment", "items", "stores"]:
-        out[name] = await db[name].find(live, P).to_list(20000)
+        table = getattr(tables, name)
+        out[name] = await db.all(select(table).where(or_(table.c.status.is_(None),
+                                   table.c.status.not_in(["Inactive", "Closed", "Disposed"]))).limit(20000))
     out["tasks"] = [t for t in out["tasks"] if t.get("chargeable", True) not in (False, "N", "false")]
     for name in ["crews", "reason_codes", "budgets", "lookups", "bonus_rates"]:
-        out[name] = await db[name].find({}, P).to_list(10000)
+        out[name] = await db.all(select(getattr(tables, name)).limit(10000))
     if member["role"] == "foreman":
         out["items"] = [{k: v for k, v in i.items() if k != "unit_cost"} for i in out["items"]]
-    out["hour_types"] = await db.hour_types.find({}, P).sort("order", 1).to_list(100)
+    out["hour_types"] = await db.all(select(tables.hour_types).order_by(tables.hour_types.c['order'].asc()).limit(100))
     out["settings"] = await get_settings()
     return out
 
@@ -113,7 +122,7 @@ class CrewIn(BaseModel):
 @api.post("/crews")
 async def create_crew(body: CrewIn, member: dict = Depends(require_role(*PLANNERS))):
     doc = {"id": new_id(), **body.model_dump()}
-    await db.crews.insert_one(doc)
+    await db.execute(insert(tables.crews).values(doc))
     await audit("crew", doc["id"], "created", member)
     doc.pop("_id", None)
     return doc
@@ -150,21 +159,21 @@ async def _plan_doc(body: PlanIn) -> dict:
     if body.end_date < body.start_date:
         raise HTTPException(400, "End date is before start date")
     if body.kind == "crew":
-        if not body.crew_id or not await db.crews.find_one({"id": body.crew_id}):
+        if not body.crew_id or not await db.one(select(tables.crews).where(tables.crews.c['id'] == body.crew_id)):
             raise HTTPException(400, "Valid crew is required")
         for ln in body.lines:
-            coll = db.employees if ln.resource_type == "labor" else db.equipment
-            if not ln.resource_type or not ln.resource_number or not await coll.find_one({"number": ln.resource_number}):
+            coll = tables.employees if ln.resource_type == "labor" else tables.equipment
+            if not ln.resource_type or not ln.resource_number or not await db.one(select(coll).where(coll.c['number'] == ln.resource_number)):
                 raise HTTPException(400, "Every plan line needs a valid employee or equipment")
             if any(v < 0 or v > 24 for v in ln.hours.values()):
                 raise HTTPException(400, "Planned hours must be between 0 and 24")
     else:
         for ln in body.lines:
-            if not ln.item_number or not await db.items.find_one({"number": ln.item_number}):
+            if not ln.item_number or not await db.one(select(tables.items).where(tables.items.c['number'] == ln.item_number)):
                 raise HTTPException(400, "Every material plan line needs a valid item")
             if not ln.planned_qty or ln.planned_qty <= 0:
                 raise HTTPException(400, f"{ln.item_number}: planned quantity must be greater than 0")
-    if not await db.tasks.find_one({"project_number": body.project_number, "number": body.task_number}):
+    if not await db.one(select(tables.tasks).where(tables.tasks.c['project_number'] == body.project_number, tables.tasks.c['number'] == body.task_number)):
         raise HTTPException(400, "Unknown Project# / Task#")
     lines = [ln.model_dump(exclude_none=True) for ln in body.lines]
     return {**body.model_dump(exclude={"lines"}), "lines": lines}
@@ -172,15 +181,15 @@ async def _plan_doc(body: PlanIn) -> dict:
 
 @api.get("/plans")
 async def list_plans(kind: Optional[str] = None, member: dict = Depends(all_active())):
-    q = {"kind": kind} if kind else {}
-    return await db.plans.find(q, P).sort("created_at", -1).to_list(1000)
+    q = [tables.plans.c.kind == kind] if kind else []
+    return await db.all(select(tables.plans).where(*q).order_by(tables.plans.c['created_at'].desc()).limit(1000))
 
 
 @api.post("/plans")
 async def create_plan(body: PlanIn, member: dict = Depends(all_active())):
     await _plan_roles_check(body.kind, member)
     doc = {"id": new_id(), **(await _plan_doc(body)), "status": "draft", "created_by": member.get("name"), "created_by_id": member["user_id"], "created_at": now_iso()}
-    await db.plans.insert_one(doc)
+    await db.execute(insert(tables.plans).values(doc))
     await audit("plan", doc["id"], "created (draft)", member)
     doc.pop("_id", None)
     return doc
@@ -189,42 +198,41 @@ async def create_plan(body: PlanIn, member: dict = Depends(all_active())):
 @api.put("/plans/{plan_id}")
 async def update_plan(plan_id: str, body: PlanIn, member: dict = Depends(all_active())):
     await _plan_roles_check(body.kind, member)
-    if not await db.plans.find_one({"id": plan_id}):
+    if not await db.one(select(tables.plans).where(tables.plans.c['id'] == plan_id)):
         raise HTTPException(404, "Not found")
-    if await db.transactions.find_one({"plan_id": plan_id, "status": {"$ne": "draft"}}):
+    if await db.one(select(tables.transactions).where(tables.transactions.c['plan_id'] == plan_id, tables.transactions.c['status'].is_distinct_from('draft'))):
         raise HTTPException(409, "Entries were already captured against this plan - create a new plan instead")
     upd = {**(await _plan_doc(body)), "status": "draft", "updated_at": now_iso()}
-    await db.plans.update_one({"id": plan_id}, {"$set": upd})
+    await db.execute(update(tables.plans).where(tables.plans.c['id'] == plan_id).values(upd))
     await audit("plan", plan_id, "updated (back to draft)", member)
-    return await db.plans.find_one({"id": plan_id}, P)
+    return await db.one(select(tables.plans).where(tables.plans.c['id'] == plan_id))
 
 
 @api.post("/plans/{plan_id}/publish")
 async def publish_plan(plan_id: str, member: dict = Depends(all_active())):
-    plan = await db.plans.find_one({"id": plan_id}, P)
+    plan = await db.one(select(tables.plans).where(tables.plans.c['id'] == plan_id))
     if not plan:
         raise HTTPException(404, "Not found")
     await _plan_roles_check(plan["kind"], member)
     if not plan["lines"]:
         raise HTTPException(400, "Add at least one line before publishing")
     if plan["kind"] == "crew":
-        others = await db.plans.find({"kind": "crew", "status": "published", "id": {"$ne": plan_id}, "shift": plan.get("shift"),
-                                      "start_date": {"$lte": plan["end_date"]}, "end_date": {"$gte": plan["start_date"]}}, P).to_list(1000)
+        others = await db.all(select(tables.plans).where(tables.plans.c['kind'] == 'crew', tables.plans.c['status'] == 'published', tables.plans.c['id'].is_distinct_from(plan_id), tables.plans.c['shift'] == plan.get('shift'), tables.plans.c['start_date'] <= plan['end_date'], tables.plans.c['end_date'] >= plan['start_date']).limit(1000))
         mine = {ln.get("resource_number") for ln in plan["lines"]}
         for o in others:
             clash = mine & {ln.get("resource_number") for ln in o["lines"]}
             if clash:
                 raise HTTPException(409, f"Conflict: {', '.join(sorted(clash))} already planned on {o['project_number']}/{o['task_number']} "
                                          f"({o['start_date']} to {o['end_date']}, {o.get('shift')})")
-    await db.plans.update_one({"id": plan_id}, {"$set": {"status": "published", "published_at": now_iso()}})
+    await db.execute(update(tables.plans).where(tables.plans.c['id'] == plan_id).values({'status': 'published', 'published_at': now_iso()}))
     await audit("plan", plan_id, "published", member)
-    return await db.plans.find_one({"id": plan_id}, P)
+    return await db.one(select(tables.plans).where(tables.plans.c['id'] == plan_id))
 
 
 @api.delete("/plans/{plan_id}")
 async def delete_plan(plan_id: str, member: dict = Depends(require_role(*PLANNERS, "store_manager"))):
-    res = await db.plans.delete_one({"id": plan_id, "status": "draft"})
-    if not res.deleted_count:
+    res = await db.execute(delete(tables.plans).where(tables.plans.c['id'] == plan_id, tables.plans.c['status'] == 'draft'))
+    if not res.rowcount:
         raise HTTPException(404, "Draft plan not found")
     await audit("plan", plan_id, "deleted", member)
     return {"ok": True}
@@ -233,8 +241,7 @@ async def delete_plan(plan_id: str, member: dict = Depends(require_role(*PLANNER
 @api.get("/plans/autofill")
 async def autofill(type: Literal["labor", "equipment"], project_number: str, task_number: str, crew_id: str, date: str,
                    member: dict = Depends(all_active())):
-    plan = await db.plans.find_one({"kind": "crew", "status": "published", "project_number": project_number, "task_number": task_number,
-                                    "crew_id": crew_id, "start_date": {"$lte": date}, "end_date": {"$gte": date}}, P)
+    plan = await db.one(select(tables.plans).where(tables.plans.c['kind'] == 'crew', tables.plans.c['status'] == 'published', tables.plans.c['project_number'] == project_number, tables.plans.c['task_number'] == task_number, tables.plans.c['crew_id'] == crew_id, tables.plans.c['start_date'] <= date, tables.plans.c['end_date'] >= date))
     if not plan:
         return {"plan": None, "lines": []}
     return {"plan": plan, "lines": await plan_rows(plan, type)}
@@ -242,13 +249,10 @@ async def autofill(type: Literal["labor", "equipment"], project_number: str, tas
 
 @api.get("/plans/material-autofill")
 async def material_autofill(project_number: str, task_number: str, date: str, member: dict = Depends(all_active())):
-    plan = await db.plans.find_one({"kind": "material", "status": "published", "project_number": project_number, "task_number": task_number,
-                                    "start_date": {"$lte": date}, "end_date": {"$gte": date}}, P)
+    plan = await db.one(select(tables.plans).where(tables.plans.c['kind'] == 'material', tables.plans.c['status'] == 'published', tables.plans.c['project_number'] == project_number, tables.plans.c['task_number'] == task_number, tables.plans.c['start_date'] <= date, tables.plans.c['end_date'] >= date))
     if not plan:
         return {"plan": None, "lines": []}
-    done = await db.transactions.find({"type": "material", "project_number": project_number, "task_number": task_number,
-                                       "status": {"$nin": ["draft", "rejected"]}, "date": {"$gte": plan["start_date"], "$lte": plan["end_date"]}},
-                                      {"_id": 0, "lines": 1}).to_list(10000)
+    done = await db.all(select(tables.transactions).where(tables.transactions.c['type'] == 'material', tables.transactions.c['project_number'] == project_number, tables.transactions.c['task_number'] == task_number, tables.transactions.c['status'].not_in(['draft', 'rejected']), tables.transactions.c['date'] >= plan['start_date'], tables.transactions.c['date'] <= plan['end_date']).limit(10000))
     lines = []
     for ln in plan["lines"]:
         used = sum(x.get("qty_consumed", 0) for d in done for x in d["lines"] if x["item_number"] == ln["item_number"])
@@ -301,9 +305,9 @@ def _check_capture(t: str, member: dict):
 
 
 async def _check_master(body: TxIn):
-    if not await db.tasks.find_one({"project_number": body.project_number, "number": body.task_number, "status": {"$nin": ["Closed", "Inactive"]}}):
+    if not await db.one(select(tables.tasks).where(tables.tasks.c['project_number'] == body.project_number, tables.tasks.c['number'] == body.task_number, or_(tables.tasks.c['status'].is_(None), tables.tasks.c['status'].not_in(['Closed', 'Inactive'])))):
         raise HTTPException(400, "Unknown or closed Project# / Task#")
-    proj = await db.projects.find_one({"number": body.project_number}, {"_id": 0, "status": 1})
+    proj = await db.one(select(tables.projects).where(tables.projects.c['number'] == body.project_number))
     if proj and proj.get("status") in ("Closed", "On Hold", "Inactive"):
         raise HTTPException(400, f"Project is {proj['status']} - no new entries")
     for ln in body.lines:
@@ -313,19 +317,19 @@ async def _check_master(body: TxIn):
             raise HTTPException(400, "Resource and Hour Type are required on every line")
     if body.bonuses:
         present = {ln.resource_number for ln in body.lines if ln.present}
-        types = {l["meaning"] for l in await db.lookups.find({"type": "BONUS_TYPE", "status": {"$ne": "Inactive"}}, P).to_list(100)}
+        types = {l["meaning"] for l in await db.all(select(tables.lookups).where(tables.lookups.c['type'] == 'BONUS_TYPE', tables.lookups.c['status'].is_distinct_from('Inactive')).limit(100))}
         for b in body.bonuses:
             if b.resource_number not in present:
                 raise HTTPException(400, f"Bonus for {b.resource_number}: employee must be on a present row")
             if b.bonus_type not in types:
                 raise HTTPException(400, f"Unknown bonus type {b.bonus_type}")
-    coll, key = {"labor": (db.employees, "resource_number"), "equipment": (db.equipment, "resource_number"), "material": (db.items, "item_number")}[body.type]
+    coll, key = {"labor": (tables.employees, "resource_number"), "equipment": (tables.equipment, "resource_number"), "material": (tables.items, "item_number")}[body.type]
     nums = {getattr(ln, key) for ln in body.lines}
-    known = {d["number"] for d in await coll.find({"number": {"$in": list(nums)}, "status": {"$nin": ["Inactive", "Disposed"]}}, {"_id": 0, "number": 1}).to_list(10000)}
+    known = {d["number"] for d in await db.all(select(coll).where(coll.c['number'].in_(list(nums)), or_(coll.c['status'].is_(None), coll.c['status'].not_in(['Inactive', 'Disposed']))).limit(10000))}
     if nums - known:
         raise HTTPException(400, f"Unknown or inactive: {', '.join(sorted(nums - known))}")
     if body.type != "material":
-        codes = {h["code"] for h in await db.hour_types.find({"resource_type": body.type}, P).to_list(50)}
+        codes = {h["code"] for h in await db.all(select(tables.hour_types).where(tables.hour_types.c['resource_type'] == body.type).limit(50))}
         bad = {ln.hour_type for ln in body.lines} - codes
         if bad:
             raise HTTPException(400, f"Unknown hour type: {', '.join(sorted(bad))}")
@@ -351,8 +355,6 @@ async def _finalize(tx: dict, action: str, member: dict) -> dict:
         if status in ("pending_step2", "approved"):
             tx["approvals"].append({"step": "pending_step1", "decision": "auto-approved", "by": "System", "role": "system", "at": now_iso(),
                                     "comment": note})
-        if status == "approved":
-            await _create_costs(tx, s)
     else:
         tx["status"] = "draft"
     return tx
@@ -360,10 +362,7 @@ async def _finalize(tx: dict, action: str, member: dict) -> dict:
 
 async def _create_costs(tx: dict, s: dict):
     for c in await build_cost_transactions(tx, s):
-        await db.cost_transactions.insert_one({
-            "id": new_id(), **c, "transaction_id": tx["id"], "transaction_ref": tx["ref"], "type": tx["type"],
-            "status": "sample" if tx.get("sample") else ("recorded" if c["kind"] == "return_to_store" else "queued"),
-            "created_at": now_iso(), "attempts": 0, "response": None})
+        await db.execute(insert(tables.cost_transactions).values({'id': new_id(), **c, 'transaction_id': tx['id'], 'transaction_ref': tx['ref'], 'type': tx['type'], 'status': 'sample' if tx.get('sample') else 'recorded' if c['kind'] == 'return_to_store' else 'queued', 'created_at': now_iso(), 'attempts': 0, 'response': None}))
 
 
 def _redact(tx: dict, member: dict) -> dict:
@@ -395,7 +394,9 @@ async def create_tx(body: TxIn, member: dict = Depends(all_active())):
           "created_by": member.get("name"), "created_by_id": member["user_id"], "submitted_by": member.get("name"),
           "submitted_by_id": member["user_id"], "created_at": now_iso(), "approvals": []}
     await _finalize(tx, body.action, member)
-    await db.transactions.insert_one(tx)
+    await db.execute(insert(tables.transactions).values(tx))
+    if tx["status"] == "approved":
+        await _create_costs(tx, await get_settings())
     await audit("transaction", tx["id"], f"created ({tx['status']})", member, {"ref": tx["ref"], "cost": tx["totals"]["cost"]})
     tx.pop("_id", None)
     return _redact(tx, member)
@@ -404,7 +405,7 @@ async def create_tx(body: TxIn, member: dict = Depends(all_active())):
 @api.put("/transactions/{tx_id}")
 async def update_tx(tx_id: str, body: TxIn, member: dict = Depends(all_active())):
     _check_capture(body.type, member)
-    old = await db.transactions.find_one({"id": tx_id, "created_by_id": member["user_id"]}, P)
+    old = await db.one(select(tables.transactions).where(tables.transactions.c['id'] == tx_id, tables.transactions.c['created_by_id'] == member['user_id']))
     if not old:
         raise HTTPException(404, "Not found")
     if old["status"] not in ("draft", "rejected"):
@@ -415,8 +416,14 @@ async def update_tx(tx_id: str, body: TxIn, member: dict = Depends(all_active())
         tx["approvals"] = old.get("approvals", []) + [{"step": "resubmit", "decision": "restarted", "by": member.get("name"),
                                                        "role": member["role"], "at": now_iso(), "comment": "Approval chain restarted"}]
     await _finalize(tx, body.action, member)
-    tx.pop("rejection_reason", None) if tx["status"] != "rejected" else None
-    await db.transactions.replace_one({"id": tx_id}, tx)
+    if tx["status"] != "rejected":
+        tx["rejection_reason"] = None
+    result = await db.execute(update(tables.transactions).where(tables.transactions.c.id == tx_id,
+                              tables.transactions.c.status == old["status"]).values(tx))
+    if not result.rowcount:
+        raise HTTPException(409, "Entry was already actioned by someone else")
+    if tx["status"] == "approved":
+        await _create_costs(tx, await get_settings())
     await audit("transaction", tx_id, f"updated ({tx['status']})", member, {"cost": tx["totals"]["cost"]})
     return _redact(tx, member)
 
@@ -424,29 +431,29 @@ async def update_tx(tx_id: str, body: TxIn, member: dict = Depends(all_active())
 @api.get("/transactions")
 async def list_tx(type: Optional[str] = None, status: Optional[str] = None, project_number: Optional[str] = None,
                   mine: bool = False, member: dict = Depends(all_active())):
-    q = {}
+    q = []
     if type:
-        q["type"] = type
+        q.append(tables.transactions.c.type == type)
     if status:
-        q["status"] = status
+        q.append(tables.transactions.c.status == status)
     if project_number:
-        q["project_number"] = project_number
+        q.append(tables.transactions.c.project_number == project_number)
     if mine or member["role"] in ("foreman", "store_manager"):
-        q["created_by_id"] = member["user_id"]
-    rows = await db.transactions.find(q, P).sort("created_at", -1).to_list(2000)
-    return [_redact(t, member) for t in rows]
+        q.append(tables.transactions.c.created_by_id == member["user_id"])
+    rows = await db.all(select(tables.transactions).where(*q).order_by(tables.transactions.c['created_at'].desc()).limit(2000))
+    return [_redact(tx, member) for tx in rows]
 
 
 @api.get("/transactions/{tx_id}")
 async def get_tx(tx_id: str, member: dict = Depends(all_active())):
-    q = {"id": tx_id}
+    q = [tables.transactions.c.id == tx_id]
     if member["role"] in ("foreman", "store_manager"):
-        q["created_by_id"] = member["user_id"]
-    tx = await db.transactions.find_one(q, P)
+        q.append(tables.transactions.c.created_by_id == member["user_id"])
+    tx = await db.one(select(tables.transactions).where(*q))
     if not tx:
         raise HTTPException(404, "Not found")
-    tx["audit"] = await db.audit.find({"entity_id": tx_id}, P).sort("at", 1).to_list(500)
-    tx["cost_transactions"] = await db.cost_transactions.find({"transaction_id": tx_id}, P).to_list(500) if member["role"] != "foreman" else []
+    tx["audit"] = await db.all(select(tables.audit).where(tables.audit.c['entity_id'] == tx_id).order_by(tables.audit.c['at'].asc()).limit(500))
+    tx["cost_transactions"] = await db.all(select(tables.cost_transactions).where(tables.cost_transactions.c['transaction_id'] == tx_id).limit(500)) if member["role"] != "foreman" else []
     return _redact(tx, member)
 
 
@@ -455,10 +462,10 @@ async def get_tx(tx_id: str, member: dict = Depends(all_active())):
 async def approvals(member: dict = Depends(require_role(*APPROVERS))):
     s = await get_settings()
     statuses = [st for st in PENDING if member["role"] in step_roles(st, s)]
-    q = {"status": {"$in": statuses}}
+    q = [tables.transactions.c.status.in_(statuses)]
     if member["role"] != "admin":
-        q["submitted_by_id"] = {"$ne": member["user_id"]}
-    return await db.transactions.find(q, P).sort("submitted_at", 1).to_list(2000)
+        q.append(tables.transactions.c.submitted_by_id.is_distinct_from(member["user_id"]))
+    return await db.all(select(tables.transactions).where(*q).order_by(tables.transactions.c['submitted_at'].asc()).limit(2000))
 
 
 class DecisionIn(BaseModel):
@@ -468,7 +475,7 @@ class DecisionIn(BaseModel):
 @api.post("/transactions/{tx_id}/approve")
 async def approve(tx_id: str, body: DecisionIn, member: dict = Depends(require_role(*APPROVERS))):
     s = await get_settings()
-    tx = await db.transactions.find_one({"id": tx_id}, P)
+    tx = await db.one(select(tables.transactions).where(tables.transactions.c['id'] == tx_id))
     if not tx or tx["status"] not in PENDING:
         raise HTTPException(404, "Not pending")
     if member["role"] not in step_roles(tx["status"], s):
@@ -479,10 +486,11 @@ async def approve(tx_id: str, body: DecisionIn, member: dict = Depends(require_r
     new_status = next_status(tx)
     entry = {"step": step, "decision": "approved", "by": member.get("name"), "role": member["role"], "at": now_iso(), "comment": body.comment}
     upd = {"status": new_status, **({"approved_at": now_iso()} if new_status == "approved" else {})}
-    res = await db.transactions.update_one({"id": tx_id, "status": step}, {"$set": upd, "$push": {"approvals": entry}})
-    if not res.modified_count:
+    res = await db.execute(update(tables.transactions).where(tables.transactions.c.id == tx_id,
+                           tables.transactions.c.status == step).values(**upd, approvals=tx["approvals"] + [entry]))
+    if not res.rowcount:
         raise HTTPException(409, "Entry was already actioned by someone else")
-    tx = await db.transactions.find_one({"id": tx_id}, P)
+    tx = await db.one(select(tables.transactions).where(tables.transactions.c['id'] == tx_id))
     if new_status == "approved":
         await _create_costs(tx, s)
     await audit("transaction", tx_id, f"approved {step} -> {new_status}", member, {"comment": body.comment})
@@ -496,19 +504,20 @@ class RejectIn(BaseModel):
 @api.post("/transactions/{tx_id}/reject")
 async def reject(tx_id: str, body: RejectIn, member: dict = Depends(require_role(*APPROVERS))):
     s = await get_settings()
-    tx = await db.transactions.find_one({"id": tx_id}, P)
+    tx = await db.one(select(tables.transactions).where(tables.transactions.c['id'] == tx_id))
     if not tx or tx["status"] not in PENDING:
         raise HTTPException(404, "Not pending")
     if member["role"] not in step_roles(tx["status"], s):
         raise HTTPException(403, "Not your approval step")
     step = tx["status"]
     entry = {"step": step, "decision": "rejected", "by": member.get("name"), "role": member["role"], "at": now_iso(), "comment": body.reason}
-    res = await db.transactions.update_one({"id": tx_id, "status": step},
-                                           {"$set": {"status": "rejected", "rejection_reason": body.reason}, "$push": {"approvals": entry}})
-    if not res.modified_count:
+    res = await db.execute(update(tables.transactions).where(tables.transactions.c.id == tx_id,
+                           tables.transactions.c.status == step).values(status="rejected",
+                           rejection_reason=body.reason, approvals=tx["approvals"] + [entry]))
+    if not res.rowcount:
         raise HTTPException(409, "Entry was already actioned by someone else")
     await audit("transaction", tx_id, f"rejected at {step}", member, {"reason": body.reason})
-    return await db.transactions.find_one({"id": tx_id}, P)
+    return await db.one(select(tables.transactions).where(tables.transactions.c['id'] == tx_id))
 
 
 # ---------- Dashboard / reports ----------
@@ -516,9 +525,13 @@ async def reject(tx_id: str, body: RejectIn, member: dict = Depends(require_role
 async def dashboard(project_number: Optional[str] = None, member: dict = Depends(all_active())):
     s = await get_settings()
     warn = s.get("budget_warning_pct", 90)
-    pq = {"project_number": project_number} if project_number else {}
-    txs = await db.transactions.find({**pq, "status": {"$nin": ["draft", "rejected"]}}, P).to_list(20000)
-    budgets = await db.budgets.find(pq, P).to_list(5000)
+    tx_query = select(tables.transactions).where(tables.transactions.c.status.not_in(['draft', 'rejected']))
+    budget_query = select(tables.budgets)
+    if project_number:
+        tx_query = tx_query.where(tables.transactions.c.project_number == project_number)
+        budget_query = budget_query.where(tables.budgets.c.project_number == project_number)
+    txs = await db.all(tx_query.limit(20000))
+    budgets = await db.all(budget_query.limit(5000))
     rows = []
     for b in budgets:
         rel = [t for t in txs if t["type"] == b["resource_type"] and t["project_number"] == b["project_number"] and t["task_number"] == b["task_number"]]
@@ -533,7 +546,7 @@ async def dashboard(project_number: Optional[str] = None, member: dict = Depends
                      "status": "stopped" if pct > 100 else "warning" if pct >= warn else "ok"})
     by_type = {t: round(sum(x["totals"]["cost"] for x in txs if x["type"] == t), 2) for t in ("labor", "equipment", "material")}
     pending = [t for t in txs if t["status"] in PENDING]
-    queued = await db.cost_transactions.count_documents({"status": {"$in": ["queued", "error"]}})
+    queued = await db.scalar(select(func.count()).select_from(tables.cost_transactions).where(tables.cost_transactions.c['status'].in_(['queued', 'error'])))
     return {"rows": rows, "cost_by_type": by_type,
             "kpis": {"actual_cost": round(sum(by_type.values()), 2),
                      "approved_cost": round(sum(t["totals"]["cost"] for t in txs if t["status"] in ("approved", "posted")), 2),
@@ -544,7 +557,7 @@ async def dashboard(project_number: Optional[str] = None, member: dict = Depends
 
 @api.get("/audit")
 async def audit_log(member: dict = Depends(require_role("admin", "cost_controller"))):
-    return await db.audit.find({}, P).sort("at", -1).to_list(500)
+    return await db.all(select(tables.audit).order_by(tables.audit.c['at'].desc()).limit(500))
 
 
 # ---------- Setup ----------
@@ -568,14 +581,15 @@ async def get_settings_route(member: dict = Depends(all_active())):
 
 @api.put("/settings")
 async def put_settings(body: SettingsIn, member: dict = Depends(require_role("admin"))):
-    await db.settings.update_one({"id": "global"}, {"$set": body.model_dump()}, upsert=True)
+    await db.execute(pg_insert(tables.settings).values(id="global", **body.model_dump())
+                     .on_conflict_do_update(index_elements=["id"], set_=body.model_dump()))
     await audit("settings", "global", "updated", member, body.model_dump())
     return await get_settings()
 
 
 @api.get("/rate-cards")
 async def rate_cards(member: dict = Depends(all_active())):
-    return await db.rate_cards.find({}, P).to_list(5000)
+    return await db.all(select(tables.rate_cards).limit(5000))
 
 
 class RateIn(BaseModel):
@@ -591,10 +605,10 @@ class RateIn(BaseModel):
 
 @api.post("/rate-cards")
 async def add_rate(body: RateIn, member: dict = Depends(require_role("admin", "master_data_admin"))):
-    if await db.rate_cards.find_one({"resource_type": body.resource_type, "key": body.key, "hour_type": body.hour_type, "effective_from": body.effective_from}):
+    if await db.one(select(tables.rate_cards).where(tables.rate_cards.c['resource_type'] == body.resource_type, tables.rate_cards.c['key'] == body.key, tables.rate_cards.c['hour_type'] == body.hour_type, tables.rate_cards.c['effective_from'] == body.effective_from)):
         raise HTTPException(409, "Rate already exists for this key, hour type and effective date")
     doc = {"id": new_id(), **body.model_dump()}
-    await db.rate_cards.insert_one(doc)
+    await db.execute(insert(tables.rate_cards).values(doc))
     await audit("rate_card", doc["id"], "created", member, body.model_dump())
     doc.pop("_id", None)
     return doc
@@ -602,11 +616,11 @@ async def add_rate(body: RateIn, member: dict = Depends(require_role("admin", "m
 
 @api.put("/rate-cards/{rid}")
 async def update_rate(rid: str, body: RateIn, member: dict = Depends(require_role("admin", "master_data_admin"))):
-    res = await db.rate_cards.update_one({"id": rid}, {"$set": body.model_dump()})
-    if not res.matched_count:
+    res = await db.execute(update(tables.rate_cards).where(tables.rate_cards.c['id'] == rid).values(body.model_dump()))
+    if not res.rowcount:
         raise HTTPException(404, "Not found")
     await audit("rate_card", rid, "updated", member, body.model_dump())
-    return await db.rate_cards.find_one({"id": rid}, P)
+    return await db.one(select(tables.rate_cards).where(tables.rate_cards.c['id'] == rid))
 
 
 class BonusRateIn(BaseModel):
@@ -620,18 +634,18 @@ class BonusRateIn(BaseModel):
 @api.post("/bonus-rates")
 async def add_bonus_rate(body: BonusRateIn, member: dict = Depends(require_role("admin", "master_data_admin"))):
     doc = {"id": new_id(), **body.model_dump()}
-    await db.bonus_rates.insert_one(dict(doc))
+    await db.execute(insert(tables.bonus_rates).values(dict(doc)))
     await audit("bonus_rate", doc["id"], "created", member, body.model_dump())
     return doc
 
 
 @api.put("/bonus-rates/{rid}")
 async def update_bonus_rate(rid: str, body: BonusRateIn, member: dict = Depends(require_role("admin", "master_data_admin"))):
-    res = await db.bonus_rates.update_one({"id": rid}, {"$set": body.model_dump()})
-    if not res.matched_count:
+    res = await db.execute(update(tables.bonus_rates).where(tables.bonus_rates.c['id'] == rid).values(body.model_dump()))
+    if not res.rowcount:
         raise HTTPException(404, "Not found")
     await audit("bonus_rate", rid, "updated", member, body.model_dump())
-    return await db.bonus_rates.find_one({"id": rid}, P)
+    return await db.one(select(tables.bonus_rates).where(tables.bonus_rates.c['id'] == rid))
 
 
 class HourTypeIn(BaseModel):
@@ -642,11 +656,11 @@ class HourTypeIn(BaseModel):
 
 @api.put("/hour-types/{hid}")
 async def update_hour_type(hid: str, body: HourTypeIn, member: dict = Depends(require_role("admin"))):
-    res = await db.hour_types.update_one({"id": hid}, {"$set": body.model_dump()})
-    if not res.matched_count:
+    res = await db.execute(update(tables.hour_types).where(tables.hour_types.c['id'] == hid).values(body.model_dump()))
+    if not res.rowcount:
         raise HTTPException(404, "Not found")
     await audit("hour_type", hid, "updated", member, body.model_dump())
-    return await db.hour_types.find_one({"id": hid}, P)
+    return await db.one(select(tables.hour_types).where(tables.hour_types.c['id'] == hid))
 
 
 class ReasonIn(BaseModel):
@@ -657,17 +671,17 @@ class ReasonIn(BaseModel):
 
 @api.post("/reason-codes")
 async def add_reason(body: ReasonIn, member: dict = Depends(require_role("admin"))):
-    if await db.reason_codes.find_one({"code": body.code}):
+    if await db.one(select(tables.reason_codes).where(tables.reason_codes.c['code'] == body.code)):
         raise HTTPException(409, "Code already exists")
     doc = {"id": new_id(), **body.model_dump()}
-    await db.reason_codes.insert_one(doc)
+    await db.execute(insert(tables.reason_codes).values(doc))
     doc.pop("_id", None)
     return doc
 
 
 @api.delete("/reason-codes/{rid}")
 async def del_reason(rid: str, member: dict = Depends(require_role("admin"))):
-    await db.reason_codes.delete_one({"id": rid})
+    await db.execute(delete(tables.reason_codes).where(tables.reason_codes.c['id'] == rid))
     return {"ok": True}
 
 
@@ -675,8 +689,8 @@ async def del_reason(rid: str, member: dict = Depends(require_role("admin"))):
 @api.get("/erp/status")
 async def erp_status(member: dict = Depends(all_active())):
     a = get_adapter()
-    counts = {s: await db.cost_transactions.count_documents({"status": s}) for s in ["queued", "sent", "error", "recorded", "sample"]}
-    last = await db.erp_batches.find_one({}, P, sort=[("started_at", -1)])
+    counts = {s: await db.scalar(select(func.count()).select_from(tables.cost_transactions).where(tables.cost_transactions.c['status'] == s)) for s in ["queued", "sent", "error", "recorded", "sample"]}
+    last = await db.one(select(tables.erp_batches).order_by(tables.erp_batches.c['started_at'].desc()))
     return {"connected": a is not None, "system": a.name if a else "Oracle Fusion PPM",
             "base_url": os.environ.get("ORACLE_FUSION_BASE", "") if member["role"] in ERP_ROLES else "",
             "counts": counts, "last_batch": last, "env": ENV}
@@ -702,16 +716,16 @@ KEYS = {"projects": ("projects", ["number"]), "tasks": ("tasks", ["project_numbe
 
 
 @api.post("/erp/sync")
-async def erp_sync(body: SyncIn, member: dict = Depends(require_role("admin"))):
+async def erp_sync(body: SyncIn, background_tasks: BackgroundTasks, member: dict = Depends(require_role("admin"))):
     a = get_adapter()
     if not a:
         raise HTTPException(400, "Oracle connection is not configured")
-    if await db.erp_batches.find_one({"direction": "pull", "status": "running"}):
+    if await db.one(select(tables.erp_batches).where(tables.erp_batches.c['direction'] == 'pull', tables.erp_batches.c['status'] == 'running')):
         raise HTTPException(409, "A master data sync is already running")
     batches = [{"id": new_id(), "direction": "pull", "entity": ent, "started_at": now_iso(), "by": member.get("name"), "status": "running", "count": 0}
                for ent in body.entities]
-    await db.erp_batches.insert_many([dict(b) for b in batches])
-    asyncio.create_task(_run_sync(a, batches))
+    await db.insert_many(tables.erp_batches, [dict(b) for b in batches])
+    background_tasks.add_task(_run_sync, a, batches)
     await audit("erp", "sync", "master data pull started", member, {"entities": body.entities})
     return batches
 
@@ -725,21 +739,32 @@ async def _run_sync(a, batches: list[dict]):
                 raise RuntimeError(f"{b['entity']} source mode is Local - ERP sync is off")
             rows = await a.pull(b["entity"])
             coll, keys = KEYS[b["entity"]]
-            local = {tuple(d.get(k) for k in keys) for d in await db[coll].find({"source": {"$ne": "oracle"}}, {"_id": 0, **{k: 1 for k in keys}}).to_list(100000)}
-            clash = [r for r in rows if tuple(r.get(k) for k in keys) in local]
-            if clash:
-                await db.erp_conflicts.insert_many([{"id": new_id(), "entity": coll, "key": " / ".join(str(r.get(k)) for k in keys), "erp": r, "at": now_iso()} for r in clash])
-            rows = [r for r in rows if tuple(r.get(k) for k in keys) not in local]
-            ops = [UpdateOne({k: r[k] for k in keys}, {"$set": {**r, "source": "oracle", "external_id": str(r.get("erp_id") or r[keys[-1]]), "synced_at": now_iso()},
-                                                      "$setOnInsert": {"id": new_id(), "status": "Active"}}, upsert=True)
-                   for r in rows]
-            for i in range(0, len(ops), 1000):
-                await db[coll].bulk_write(ops[i:i + 1000], ordered=False)
-            upd = {"status": "success", "count": len(rows), **({"error": f"{len(clash)} key conflicts with local records - see Master Data"} if clash else {})}
+            table = getattr(tables, coll)
+            async with db.transaction(independent=True):
+                local_rows = await db.all(select(table).where(table.c.source.is_distinct_from("oracle")))
+                local_keys = {tuple(record.get(k) for k in keys) for record in local_rows}
+                clash = [row for row in rows if tuple(row.get(k) for k in keys) in local_keys]
+                if clash:
+                    await db.insert_many(tables.erp_conflicts, [{"id": new_id(), "entity": coll,
+                        "key": " / ".join(str(row.get(k)) for k in keys), "erp": row, "at": now_iso()} for row in clash])
+                rows = [row for row in rows if tuple(row.get(k) for k in keys) not in local_keys]
+                for i in range(0, len(rows), 1000):
+                    documents = [{"id": new_id(), "status": "Active", **row, "source": "oracle",
+                                  "external_id": str(row.get("erp_id") or row[keys[-1]]), "synced_at": now_iso()}
+                                 for row in rows[i:i + 1000]]
+                    statement = pg_insert(table).values(documents)
+                    await db.execute(statement.on_conflict_do_update(index_elements=keys,
+                                     set_={k: statement.excluded[k] for k in documents[0]
+                                           if k != "id" and k not in keys and (k != "status" or "status" in rows[i])}))
+                await db.execute(update(tables.erp_batches).where(tables.erp_batches.c.id == b["id"])
+                                 .values(status="success", count=len(rows), finished_at=now_iso(),
+                                         error=f"{len(clash)} key conflicts with local records - see Master Data" if clash else None))
         except Exception as e:
             logger.exception("ERP sync %s failed", b["entity"])
             upd = {"status": "error", "error": str(e)[:500]}
-        await db.erp_batches.update_one({"id": b["id"]}, {"$set": {**upd, "finished_at": now_iso()}})
+            async with db.transaction(independent=True):
+                await db.execute(update(tables.erp_batches).where(tables.erp_batches.c.id == b["id"])
+                                 .values(**upd, finished_at=now_iso()))
 
 
 @api.post("/erp/push")
@@ -747,7 +772,7 @@ async def erp_push(member: dict = Depends(require_role(*ERP_ROLES))):
     a = get_adapter()
     if not a:
         raise HTTPException(400, "Oracle connection is not configured")
-    pend = await db.cost_transactions.find({"status": {"$in": ["queued", "error"]}, "kind": "project_cost"}, P).to_list(2000)
+    pend = await db.all(select(tables.cost_transactions).where(tables.cost_transactions.c['status'].in_(['queued', 'error']), tables.cost_transactions.c['kind'] == 'project_cost').limit(2000).with_for_update(skip_locked=True))
     batch = {"id": new_id(), "direction": "push", "entity": "unprocessedProjectCosts", "started_at": now_iso(), "by": member.get("name")}
     ok = err = 0
     for c in pend:
@@ -756,13 +781,14 @@ async def erp_push(member: dict = Depends(require_role(*ERP_ROLES))):
         except Exception as e:
             r = {"ok": False, "status": 0, "body": str(e)[:300]}
         ok, err = ok + r["ok"], err + (not r["ok"])
-        await db.cost_transactions.update_one({"id": c["id"]}, {"$set": {"status": "sent" if r["ok"] else "error", "response": r,
-                                                                      "batch_id": batch["id"], "sent_at": now_iso()}, "$inc": {"attempts": 1}})
+        await db.execute(update(tables.cost_transactions).where(tables.cost_transactions.c.id == c["id"])
+                         .values(status="sent" if r["ok"] else "error", response=r, batch_id=batch["id"],
+                                 sent_at=now_iso(), attempts=tables.cost_transactions.c.attempts + 1))
     for tid in {c["transaction_id"] for c in pend}:
-        if not await db.cost_transactions.count_documents({"transaction_id": tid, "kind": "project_cost", "status": {"$ne": "sent"}}):
-            await db.transactions.update_one({"id": tid}, {"$set": {"status": "posted", "posted_at": now_iso()}})
+        if not await db.scalar(select(func.count()).select_from(tables.cost_transactions).where(tables.cost_transactions.c['transaction_id'] == tid, tables.cost_transactions.c['kind'] == 'project_cost', tables.cost_transactions.c['status'].is_distinct_from('sent'))):
+            await db.execute(update(tables.transactions).where(tables.transactions.c['id'] == tid).values({'status': 'posted', 'posted_at': now_iso()}))
     batch.update(status="success" if not err else "partial" if ok else "error", count=len(pend), ok=ok, failed=err, finished_at=now_iso())
-    await db.erp_batches.insert_one(batch)
+    await db.execute(insert(tables.erp_batches).values(batch))
     batch.pop("_id", None)
     await audit("erp", batch["id"], "cost push", member, {"ok": ok, "failed": err})
     return batch
@@ -770,13 +796,13 @@ async def erp_push(member: dict = Depends(require_role(*ERP_ROLES))):
 
 @api.get("/erp/batches")
 async def erp_batches(member: dict = Depends(require_role(*ERP_ROLES))):
-    return await db.erp_batches.find({}, P).sort("started_at", -1).to_list(200)
+    return await db.all(select(tables.erp_batches).order_by(tables.erp_batches.c['started_at'].desc()).limit(200))
 
 
 @api.get("/erp/cost-transactions")
 async def erp_costs(status: Optional[str] = None, member: dict = Depends(require_role(*ERP_ROLES))):
-    q = {"status": status} if status else {}
-    return await db.cost_transactions.find(q, P).sort("created_at", -1).to_list(2000)
+    q = [tables.cost_transactions.c.status == status] if status else []
+    return await db.all(select(tables.cost_transactions).where(*q).order_by(tables.cost_transactions.c['created_at'].desc()).limit(2000))
 
 
 app.include_router(api)
